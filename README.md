@@ -265,7 +265,7 @@
 
 ```bash
 brew install xcodegen
-./scripts/build_unsigned_ipa.sh 0.1.0
+./scripts/build_unsigned_ipa.sh 0.1.1
 ```
 
 说明：当前产物为 **未签名 IPA**，用于 CI 验证与归档，不可直接安装到真机发布。

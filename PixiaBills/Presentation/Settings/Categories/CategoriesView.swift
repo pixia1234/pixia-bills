@@ -26,7 +26,7 @@ struct CategoriesView: View {
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: category.iconName)
-                                .foregroundColor(.black)
+                                .foregroundColor(.primary)
                                 .frame(width: 30, height: 30)
                                 .background(Color("SecondaryBackground"))
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -89,7 +89,7 @@ private struct CategoryEditorSheet: View {
                         Text("预览")
                         Spacer()
                         Image(systemName: iconName)
-                            .foregroundColor(.black)
+                            .foregroundColor(.primary)
                             .frame(width: 34, height: 34)
                             .background(Color("SecondaryBackground"))
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))

@@ -88,7 +88,7 @@ private struct AccountBalanceRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: iconName)
-                .foregroundColor(.black)
+                .foregroundColor(.primary)
                 .frame(width: 34, height: 34)
                 .background(Color("SecondaryBackground"))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -130,7 +130,7 @@ private struct TransferRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "arrow.left.arrow.right")
-                .foregroundColor(.black)
+                .foregroundColor(.primary)
                 .frame(width: 34, height: 34)
                 .background(Color("SecondaryBackground"))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))

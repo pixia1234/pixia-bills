@@ -115,7 +115,7 @@ private struct CategoryPickerStep: View {
                             VStack(spacing: 8) {
                                 Image(systemName: category.iconName)
                                     .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(.black)
+                                    .foregroundColor(.primary)
                                     .frame(width: 44, height: 44)
                                     .background(Color("SecondaryBackground"))
                                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -181,7 +181,7 @@ private struct AmountInputStep: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
                 .background(Color("PrimaryYellow"))
-                .foregroundColor(.black)
+                .foregroundColor(.primary)
                 .clipShape(Capsule())
                 .accessibilityLabel("保存流水")
             }

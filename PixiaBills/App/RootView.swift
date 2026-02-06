@@ -58,7 +58,7 @@ private struct AddFloatingButton: View {
         Button(action: action) {
             Image(systemName: "plus")
                 .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.black)
+                .foregroundColor(.primary)
                 .frame(width: 56, height: 56)
                 .background(Color("PrimaryYellow"))
                 .clipShape(Circle())

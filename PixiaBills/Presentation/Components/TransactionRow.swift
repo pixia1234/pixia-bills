@@ -8,7 +8,7 @@ struct TransactionRow: View {
         HStack(spacing: 12) {
             let category = store.category(for: transaction.categoryId)
             Image(systemName: category?.iconName ?? "questionmark")
-                .foregroundColor(.black)
+                .foregroundColor(.primary)
                 .frame(width: 34, height: 34)
                 .background(Color("SecondaryBackground"))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -48,4 +48,3 @@ struct TransactionRow: View {
         }
     }
 }
-
