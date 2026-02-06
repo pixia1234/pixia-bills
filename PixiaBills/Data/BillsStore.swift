@@ -8,6 +8,8 @@ final class BillsStore: ObservableObject {
     @Published private(set) var budgets: [Budget] = []
     @Published private(set) var transfers: [Transfer] = []
     @Published private(set) var recurringTransactions: [RecurringTransaction] = []
+    @Published private(set) var iCloudSyncStatus: String = "未开启"
+    @Published private(set) var iCloudLastSyncedAt: Date?
 
     private let transactionsStore = JSONFileStore(filename: "transactions.json")
     private let categoriesStore = JSONFileStore(filename: "categories.json")
@@ -16,8 +18,30 @@ final class BillsStore: ObservableObject {
     private let transfersStore = JSONFileStore(filename: "transfers.json")
     private let recurringTransactionsStore = JSONFileStore(filename: "recurring-transactions.json")
 
+    private enum ICloudKeys {
+        static let snapshot = "pixia-bills.snapshot.v1"
+    }
+
+    private struct ICloudSnapshot: Codable {
+        let syncedAt: Date
+        let transactions: [Transaction]
+        let categories: [Category]
+        let accounts: [Account]
+        let budgets: [Budget]
+        let transfers: [Transfer]
+        let recurringTransactions: [RecurringTransaction]
+    }
+
+    private var iCloudSyncEnabled = false
+    private var isApplyingICloudSnapshot = false
+    private var iCloudObserver: NSObjectProtocol?
+
     init() {
         load()
+    }
+
+    deinit {
+        stopObservingICloud()
     }
 
     var defaultAccountId: UUID {
@@ -45,6 +69,26 @@ final class BillsStore: ObservableObject {
         applyRecurringTransactionsIfNeeded()
     }
 
+    func setICloudSyncEnabled(_ enabled: Bool) {
+        iCloudSyncEnabled = enabled
+
+        if enabled {
+            iCloudSyncStatus = "同步中"
+            startObservingICloudIfNeeded()
+            _ = NSUbiquitousKeyValueStore.default.synchronize()
+
+            let hasLocalData = hasUserGeneratedData()
+            let pulled = pullSnapshotFromICloud(force: !hasLocalData)
+            if !pulled {
+                pushSnapshotToICloud()
+            }
+            iCloudSyncStatus = "已开启"
+        } else {
+            stopObservingICloud()
+            iCloudSyncStatus = "未开启"
+        }
+    }
+
     func addTransaction(
         type: TransactionType,
         amount: Decimal,
@@ -67,6 +111,55 @@ final class BillsStore: ObservableObject {
         )
         transactions.insert(transaction, at: 0)
         persistTransactions()
+    }
+
+    @discardableResult
+    func importTransactionsFromLLM(_ drafts: [LLMImportedTransactionDraft]) -> Int {
+        guard !drafts.isEmpty else { return 0 }
+
+        var imported = 0
+        var categoryChanged = false
+        var accountChanged = false
+        let now = Date()
+
+        for draft in drafts {
+            let normalizedType = draft.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let type = TransactionType(rawValue: normalizedType) else { continue }
+            guard let amount = DecimalParser.parse(draft.amount), amount > 0 else { continue }
+
+            let category = resolveCategory(
+                name: draft.categoryName,
+                type: type,
+                didCreate: &categoryChanged
+            )
+            let account = resolveAccount(name: draft.accountName, didCreate: &accountChanged)
+
+            let transaction = Transaction(
+                id: UUID(),
+                type: type,
+                amount: amount,
+                date: parseLLMDate(text: draft.dateText) ?? now,
+                categoryId: category.id,
+                accountId: account.id,
+                note: draft.note.nilIfEmpty,
+                createdAt: now,
+                updatedAt: now
+            )
+            transactions.insert(transaction, at: 0)
+            imported += 1
+        }
+
+        if categoryChanged {
+            persistCategories()
+        }
+        if accountChanged {
+            persistAccounts()
+        }
+        if imported > 0 {
+            persistTransactions()
+        }
+
+        return imported
     }
 
     func addAccount(name: String, type: Account.AccountType, initialBalance: Decimal) {
@@ -454,26 +547,32 @@ final class BillsStore: ObservableObject {
 
     private func persistTransactions() {
         transactionsStore.save(transactions)
+        pushSnapshotToICloudIfNeeded()
     }
 
     private func persistCategories() {
         categoriesStore.save(categories)
+        pushSnapshotToICloudIfNeeded()
     }
 
     private func persistAccounts() {
         accountsStore.save(accounts)
+        pushSnapshotToICloudIfNeeded()
     }
 
     private func persistBudgets() {
         budgetsStore.save(budgets)
+        pushSnapshotToICloudIfNeeded()
     }
 
     private func persistTransfers() {
         transfersStore.save(transfers)
+        pushSnapshotToICloudIfNeeded()
     }
 
     private func persistRecurringTransactions() {
         recurringTransactionsStore.save(recurringTransactions)
+        pushSnapshotToICloudIfNeeded()
     }
 
     private func ensureBuiltInAccounts() {
@@ -581,6 +680,187 @@ final class BillsStore: ObservableObject {
         return transactions.contains(where: {
             calendar.isDate($0.date, inSameDayAs: date) && ($0.note?.contains(marker) ?? false)
         })
+    }
+
+    private func hasUserGeneratedData() -> Bool {
+        !transactions.isEmpty || !budgets.isEmpty || !transfers.isEmpty || !recurringTransactions.isEmpty
+    }
+
+    private func resolveCategory(name: String, type: TransactionType, didCreate: inout Bool) -> Category {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            if let existing = categories.first(where: {
+                $0.type == type && $0.name.compare(trimmed, options: .caseInsensitive) == .orderedSame
+            }) {
+                return existing
+            }
+
+            let nextOrder = (categories(ofType: type).map { $0.sortOrder }.max() ?? 0) + 1
+            let newCategory = Category(
+                id: UUID(),
+                type: type,
+                name: trimmed,
+                iconName: defaultIconName(for: type),
+                sortOrder: nextOrder,
+                isDefault: false
+            )
+            categories.append(newCategory)
+            didCreate = true
+            return newCategory
+        }
+
+        if let fallback = categories(ofType: type).first {
+            return fallback
+        }
+
+        let fallbackCategory = Category(
+            id: UUID(),
+            type: type,
+            name: type == .expense ? "未分类支出" : "未分类收入",
+            iconName: defaultIconName(for: type),
+            sortOrder: 0,
+            isDefault: false
+        )
+        categories.append(fallbackCategory)
+        didCreate = true
+        return fallbackCategory
+    }
+
+    private func resolveAccount(name: String, didCreate: inout Bool) -> Account {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            if let existing = accounts.first(where: { $0.name.compare(trimmed, options: .caseInsensitive) == .orderedSame }) {
+                return existing
+            }
+
+            let account = Account(id: UUID(), name: trimmed, type: .cash, initialBalance: 0)
+            accounts.append(account)
+            didCreate = true
+            return account
+        }
+
+        return accounts.first ?? DefaultData.accounts[0]
+    }
+
+    private func parseLLMDate(text: String) -> Date? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let full = ISO8601DateFormatter()
+        full.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = full.date(from: trimmed) {
+            return date
+        }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        if let date = standard.date(from: trimmed) {
+            return date
+        }
+
+        return DateFormatter.dayTitle.date(from: trimmed)
+    }
+
+    private func defaultIconName(for type: TransactionType) -> String {
+        switch type {
+        case .income:
+            return "banknote"
+        case .expense:
+            return "cart"
+        }
+    }
+
+    private func pushSnapshotToICloudIfNeeded() {
+        guard iCloudSyncEnabled else { return }
+        guard !isApplyingICloudSnapshot else { return }
+        pushSnapshotToICloud()
+    }
+
+    private func pushSnapshotToICloud() {
+        guard iCloudSyncEnabled else { return }
+
+        let snapshot = ICloudSnapshot(
+            syncedAt: Date(),
+            transactions: transactions,
+            categories: categories,
+            accounts: accounts,
+            budgets: budgets,
+            transfers: transfers,
+            recurringTransactions: recurringTransactions
+        )
+
+        do {
+            let data = try JSONEncoder.appEncoder.encode(snapshot)
+            let store = NSUbiquitousKeyValueStore.default
+            store.set(data, forKey: ICloudKeys.snapshot)
+            store.synchronize()
+            iCloudLastSyncedAt = Date()
+            iCloudSyncStatus = "已开启"
+        } catch {
+            iCloudSyncStatus = "同步失败"
+        }
+    }
+
+    @discardableResult
+    private func pullSnapshotFromICloud(force: Bool) -> Bool {
+        let store = NSUbiquitousKeyValueStore.default
+        guard let data = store.data(forKey: ICloudKeys.snapshot) else { return false }
+
+        do {
+            let snapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: data)
+            if !force, hasUserGeneratedData() {
+                return false
+            }
+            applyICloudSnapshot(snapshot)
+            return true
+        } catch {
+            iCloudSyncStatus = "同步失败"
+            return false
+        }
+    }
+
+    private func applyICloudSnapshot(_ snapshot: ICloudSnapshot) {
+        isApplyingICloudSnapshot = true
+        defer { isApplyingICloudSnapshot = false }
+
+        transactions = snapshot.transactions
+        categories = snapshot.categories.isEmpty ? DefaultData.categories : snapshot.categories
+        accounts = snapshot.accounts.isEmpty ? DefaultData.accounts : snapshot.accounts
+        budgets = snapshot.budgets
+        transfers = snapshot.transfers
+        recurringTransactions = snapshot.recurringTransactions
+
+        ensureBuiltInAccounts()
+
+        transactionsStore.save(transactions)
+        categoriesStore.save(categories)
+        accountsStore.save(accounts)
+        budgetsStore.save(budgets)
+        transfersStore.save(transfers)
+        recurringTransactionsStore.save(recurringTransactions)
+
+        iCloudLastSyncedAt = snapshot.syncedAt
+        iCloudSyncStatus = "已开启"
+    }
+
+    private func startObservingICloudIfNeeded() {
+        guard iCloudObserver == nil else { return }
+
+        iCloudObserver = NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: NSUbiquitousKeyValueStore.default,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.pullSnapshotFromICloud(force: true)
+        }
+    }
+
+    private func stopObservingICloud() {
+        if let observer = iCloudObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        iCloudObserver = nil
     }
 
     private func moveItems<T>(_ array: inout [T], from source: IndexSet, to destination: Int) {
