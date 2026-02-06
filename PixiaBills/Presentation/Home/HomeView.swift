@@ -39,17 +39,7 @@ struct HomeView: View {
 
     private var compactLayout: some View {
         NavigationView {
-            VStack(spacing: 12) {
-                MonthPicker(month: $month)
-                    .padding(.top, 8)
-
-                SummaryHeader(summary: store.monthlySummary(for: month))
-                    .padding(.horizontal, 16)
-
-                transactionsList(selectionEnabled: false)
-            }
-            .navigationTitle("明细")
-            .navigationBarTitleDisplayMode(.inline)
+            mainColumn(selectionEnabled: false)
         }
     }
 
@@ -57,35 +47,49 @@ struct HomeView: View {
         Group {
             if #available(iOS 16.0, *) {
                 NavigationSplitView {
-                    VStack(spacing: 12) {
-                        MonthPicker(month: $month)
-                            .padding(.top, 8)
-
-                        SummaryHeader(summary: store.monthlySummary(for: month))
-                            .padding(.horizontal, 16)
-
-                        transactionsList(selectionEnabled: true)
-                    }
-                    .navigationTitle("明细")
-                    .navigationBarTitleDisplayMode(.inline)
+                    mainColumn(selectionEnabled: true)
                 } detail: {
-                    if let transaction = selectedTransaction {
-                        TransactionDetailPane(
-                            transaction: transaction,
-                            onDelete: {
-                                store.deleteTransactions(ids: [transaction.id])
-                                selectedTransactionId = nil
-                                selectDefaultTransactionIfNeeded(force: false)
-                            }
-                        )
-                    } else {
-                        EmptySelectionView()
-                    }
+                    detailColumn
                 }
             } else {
-                compactLayout
+                legacyRegularLayout
             }
         }
+    }
+
+    private var legacyRegularLayout: some View {
+        NavigationView {
+            mainColumn(selectionEnabled: true)
+            detailColumn
+        }
+    }
+
+    @ViewBuilder
+    private var detailColumn: some View {
+        if let transaction = selectedTransaction {
+            TransactionDetailPane(
+                transaction: transaction,
+                onDelete: {
+                    deleteTransaction(transaction)
+                }
+            )
+        } else {
+            EmptySelectionView()
+        }
+    }
+
+    private func mainColumn(selectionEnabled: Bool) -> some View {
+        VStack(spacing: 12) {
+            MonthPicker(month: $month)
+                .padding(.top, 8)
+
+            SummaryHeader(summary: store.monthlySummary(for: month))
+                .padding(.horizontal, 16)
+
+            transactionsList(selectionEnabled: selectionEnabled)
+        }
+        .navigationTitle("明细")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder
@@ -107,7 +111,13 @@ struct HomeView: View {
                                     : Color.clear
                             )
                         } else {
-                            TransactionRow(transaction: tx)
+                            NavigationLink {
+                                TransactionDetailRoute(transaction: tx) {
+                                    deleteTransaction(tx)
+                                }
+                            } label: {
+                                TransactionRow(transaction: tx)
+                            }
                         }
                     }
                     .onDelete { offsets in
@@ -121,6 +131,12 @@ struct HomeView: View {
             }
         }
         .listStyle(.insetGrouped)
+    }
+
+    private func deleteTransaction(_ transaction: Transaction) {
+        store.deleteTransactions(ids: [transaction.id])
+        selectedTransactionId = nil
+        selectDefaultTransactionIfNeeded(force: false)
     }
 
     private func selectDefaultTransactionIfNeeded(force: Bool) {
@@ -145,6 +161,20 @@ struct HomeView: View {
         if !stillExists {
             self.selectedTransactionId = nil
             selectDefaultTransactionIfNeeded(force: false)
+        }
+    }
+}
+
+private struct TransactionDetailRoute: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let transaction: Transaction
+    let onDelete: () -> Void
+
+    var body: some View {
+        TransactionDetailPane(transaction: transaction) {
+            onDelete()
+            dismiss()
         }
     }
 }
