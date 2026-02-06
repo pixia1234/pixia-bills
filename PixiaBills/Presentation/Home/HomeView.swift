@@ -54,30 +54,36 @@ struct HomeView: View {
     }
 
     private var regularLayout: some View {
-        NavigationSplitView {
-            VStack(spacing: 12) {
-                MonthPicker(month: $month)
-                    .padding(.top, 8)
+        Group {
+            if #available(iOS 16.0, *) {
+                NavigationSplitView {
+                    VStack(spacing: 12) {
+                        MonthPicker(month: $month)
+                            .padding(.top, 8)
 
-                SummaryHeader(summary: store.monthlySummary(for: month))
-                    .padding(.horizontal, 16)
+                        SummaryHeader(summary: store.monthlySummary(for: month))
+                            .padding(.horizontal, 16)
 
-                transactionsList(selectionEnabled: true)
-            }
-            .navigationTitle("明细")
-            .navigationBarTitleDisplayMode(.inline)
-        } detail: {
-            if let transaction = selectedTransaction {
-                TransactionDetailPane(
-                    transaction: transaction,
-                    onDelete: {
-                        store.deleteTransactions(ids: [transaction.id])
-                        selectedTransactionId = nil
-                        selectDefaultTransactionIfNeeded(force: false)
+                        transactionsList(selectionEnabled: true)
                     }
-                )
+                    .navigationTitle("明细")
+                    .navigationBarTitleDisplayMode(.inline)
+                } detail: {
+                    if let transaction = selectedTransaction {
+                        TransactionDetailPane(
+                            transaction: transaction,
+                            onDelete: {
+                                store.deleteTransactions(ids: [transaction.id])
+                                selectedTransactionId = nil
+                                selectDefaultTransactionIfNeeded(force: false)
+                            }
+                        )
+                    } else {
+                        EmptySelectionView()
+                    }
+                }
             } else {
-                EmptySelectionView()
+                compactLayout
             }
         }
     }
