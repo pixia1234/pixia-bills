@@ -250,6 +250,11 @@
 - 平台：`macos-14`
 - 产物：`build/pixia-bills-<版本号>.ipa`
 
+当触发 `push tag(v*)` 时，Workflow 会自动：
+
+- 上传 Actions Artifact
+- 将同名 `ipa` 自动发布到对应 GitHub Release（自动创建或覆盖同名资产）
+
 版本号来源（优先级）：
 
 1. 手动触发输入的 `version`
