@@ -21,7 +21,7 @@ struct HomeView: View {
                                 TransactionRow(transaction: tx)
                             }
                             .onDelete { offsets in
-                                let ids = offsets.compactMap { index in
+                                let ids: [UUID] = offsets.compactMap { index in
                                     guard section.transactions.indices.contains(index) else { return nil }
                                     return section.transactions[index].id
                                 }

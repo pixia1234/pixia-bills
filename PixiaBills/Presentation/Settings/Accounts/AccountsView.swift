@@ -24,7 +24,7 @@ struct AccountsView: View {
                         }
                     }
                     .onDelete { offsets in
-                        let ids = offsets.compactMap { index in
+                        let ids: [UUID] = offsets.compactMap { index in
                             guard balances.indices.contains(index) else { return nil }
                             return balances[index].account.id
                         }
@@ -308,4 +308,3 @@ private struct TransferEditorSheet: View {
         dismiss()
     }
 }
-

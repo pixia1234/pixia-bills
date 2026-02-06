@@ -17,7 +17,7 @@ struct RecurringTransactionsView: View {
                     }
                     .onDelete { offsets in
                         let list = store.recurringTransactions.sorted(by: { $0.createdAt > $1.createdAt })
-                        let ids = offsets.compactMap { index in
+                        let ids: [UUID] = offsets.compactMap { index in
                             guard list.indices.contains(index) else { return nil }
                             return list[index].id
                         }
@@ -217,4 +217,3 @@ private struct RecurringEditorSheet: View {
         dismiss()
     }
 }
-

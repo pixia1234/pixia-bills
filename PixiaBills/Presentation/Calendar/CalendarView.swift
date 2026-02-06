@@ -12,14 +12,17 @@ struct CalendarView: View {
                 MonthPicker(month: $month)
                     .padding(.top, 8)
 
-                MonthGrid(month: month) { day in
-                    selectedDay = IdentifiableDate(date: day)
-                } cellContent: { day in
+                MonthGrid(
+                    month: month,
+                    onSelectDay: { day in
+                        selectedDay = IdentifiableDate(date: day)
+                    },
+                    cellContent: { day in
                     let expense = store.transactions(onDay: day)
                         .filter { $0.type == .expense }
                         .reduce(Decimal(0)) { $0 + $1.amount }
                     CalendarDayCell(day: day, expense: expense)
-                }
+                })
                 .padding(.horizontal, 12)
 
                 Spacer(minLength: 0)

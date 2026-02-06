@@ -8,7 +8,7 @@ options:
 settings:
   base:
     PRODUCT_BUNDLE_IDENTIFIER: com.pixia.bills
-    SWIFT_VERSION: "5.0"
+    SWIFT_VERSION: "5.9"
     CURRENT_PROJECT_VERSION: 1
     MARKETING_VERSION: 0.1.0
     INFOPLIST_KEY_CFBundleDisplayName: pixia-bills

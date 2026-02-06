@@ -87,7 +87,7 @@ final class BillsStore: ObservableObject {
     }
 
     func deleteAccounts(at offsets: IndexSet) {
-        let ids = offsets.compactMap { index in
+        let ids: [UUID] = offsets.compactMap { index in
             guard accounts.indices.contains(index) else { return nil }
             return accounts[index].id
         }
@@ -286,7 +286,7 @@ final class BillsStore: ObservableObject {
     }
 
     func deleteTransactions(at offsets: IndexSet) {
-        let ids = offsets.compactMap { index in
+        let ids: [UUID] = offsets.compactMap { index in
             guard transactions.indices.contains(index) else { return nil }
             return transactions[index].id
         }
