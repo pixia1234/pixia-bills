@@ -2,7 +2,18 @@ import Foundation
 
 enum DefaultData {
     static let accounts: [Account] = [
-        Account(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, name: "现金", type: .cash)
+        Account(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            name: "现金",
+            type: .cash,
+            initialBalance: 0
+        ),
+        Account(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            name: "储蓄卡",
+            type: .bank,
+            initialBalance: 0
+        )
     ]
 
     static let categories: [Category] = {
@@ -45,4 +56,3 @@ enum DefaultData {
         ]
     }()
 }
-

@@ -5,10 +5,16 @@ final class BillsStore: ObservableObject {
     @Published private(set) var transactions: [Transaction] = []
     @Published private(set) var categories: [Category] = []
     @Published private(set) var accounts: [Account] = []
+    @Published private(set) var budgets: [Budget] = []
+    @Published private(set) var transfers: [Transfer] = []
+    @Published private(set) var recurringTransactions: [RecurringTransaction] = []
 
     private let transactionsStore = JSONFileStore(filename: "transactions.json")
     private let categoriesStore = JSONFileStore(filename: "categories.json")
     private let accountsStore = JSONFileStore(filename: "accounts.json")
+    private let budgetsStore = JSONFileStore(filename: "budgets.json")
+    private let transfersStore = JSONFileStore(filename: "transfers.json")
+    private let recurringTransactionsStore = JSONFileStore(filename: "recurring-transactions.json")
 
     init() {
         load()
@@ -22,6 +28,9 @@ final class BillsStore: ObservableObject {
         transactions = transactionsStore.load([Transaction].self, default: [])
         categories = categoriesStore.load([Category].self, default: DefaultData.categories)
         accounts = accountsStore.load([Account].self, default: DefaultData.accounts)
+        budgets = budgetsStore.load([Budget].self, default: [])
+        transfers = transfersStore.load([Transfer].self, default: [])
+        recurringTransactions = recurringTransactionsStore.load([RecurringTransaction].self, default: [])
 
         if categories.isEmpty {
             categories = DefaultData.categories
@@ -31,6 +40,9 @@ final class BillsStore: ObservableObject {
             accounts = DefaultData.accounts
             persistAccounts()
         }
+
+        ensureBuiltInAccounts()
+        applyRecurringTransactionsIfNeeded()
     }
 
     func addTransaction(
@@ -55,6 +67,222 @@ final class BillsStore: ObservableObject {
         )
         transactions.insert(transaction, at: 0)
         persistTransactions()
+    }
+
+    func addAccount(name: String, type: Account.AccountType, initialBalance: Decimal) {
+        let account = Account(
+            id: UUID(),
+            name: name,
+            type: type,
+            initialBalance: initialBalance
+        )
+        accounts.append(account)
+        persistAccounts()
+    }
+
+    func updateAccount(_ account: Account) {
+        guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+        accounts[index] = account
+        persistAccounts()
+    }
+
+    func deleteAccounts(at offsets: IndexSet) {
+        let ids = offsets.compactMap { index in
+            guard accounts.indices.contains(index) else { return nil }
+            return accounts[index].id
+        }
+        deleteAccounts(ids: ids)
+    }
+
+    func deleteAccounts(ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        let usedIds = Set(
+            transactions.map(\.accountId) +
+            transfers.flatMap { [$0.fromAccountId, $0.toAccountId] } +
+            recurringTransactions.map(\.accountId)
+        )
+
+        let validDelete = ids.filter { id in
+            id != defaultAccountId && !usedIds.contains(id)
+        }
+        guard !validDelete.isEmpty else { return }
+
+        let idSet = Set(validDelete)
+        accounts.removeAll(where: { idSet.contains($0.id) })
+        persistAccounts()
+    }
+
+    func account(for id: UUID) -> Account? {
+        accounts.first(where: { $0.id == id })
+    }
+
+    func accountBalances() -> [AccountBalance] {
+        accounts
+            .map { account in
+                let accountTransactions = transactions.filter { $0.accountId == account.id }
+                var balance = account.initialBalance
+                for transaction in accountTransactions {
+                    switch transaction.type {
+                    case .income:
+                        balance += transaction.amount
+                    case .expense:
+                        balance -= transaction.amount
+                    }
+                }
+
+                let accountTransfers = transfers.filter {
+                    $0.fromAccountId == account.id || $0.toAccountId == account.id
+                }
+                for transfer in accountTransfers {
+                    if transfer.fromAccountId == account.id {
+                        balance -= transfer.amount
+                    }
+                    if transfer.toAccountId == account.id {
+                        balance += transfer.amount
+                    }
+                }
+
+                return AccountBalance(account: account, balance: balance)
+            }
+            .sorted(by: { $0.balance > $1.balance })
+    }
+
+    func addTransfer(fromAccountId: UUID, toAccountId: UUID, amount: Decimal, date: Date, note: String?) {
+        guard fromAccountId != toAccountId, amount > 0 else { return }
+        guard account(for: fromAccountId) != nil, account(for: toAccountId) != nil else { return }
+
+        let now = Date()
+        let transfer = Transfer(
+            id: UUID(),
+            amount: amount,
+            date: date,
+            fromAccountId: fromAccountId,
+            toAccountId: toAccountId,
+            note: note?.nilIfEmpty,
+            createdAt: now,
+            updatedAt: now
+        )
+        transfers.insert(transfer, at: 0)
+        persistTransfers()
+    }
+
+    func deleteTransfers(ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        let idSet = Set(ids)
+        transfers.removeAll(where: { idSet.contains($0.id) })
+        persistTransfers()
+    }
+
+    func transfers(inMonth month: Date) -> [Transfer] {
+        let range = Calendar.current.monthDateInterval(containing: month)
+        return transfers.filter { range.contains($0.date) }.sorted(by: { $0.date > $1.date })
+    }
+
+    func upsertBudget(month: Date, type: TransactionType, categoryId: UUID?, limit: Decimal) {
+        guard limit > 0 else { return }
+        let start = month.startOfDay()
+        if let index = budgets.firstIndex(where: {
+            Calendar.current.isDate($0.month, equalTo: start, toGranularity: .month) &&
+            $0.type == type &&
+            $0.categoryId == categoryId
+        }) {
+            budgets[index].limit = limit
+            budgets[index].updatedAt = Date()
+        } else {
+            let now = Date()
+            budgets.append(
+                Budget(
+                    id: UUID(),
+                    month: start,
+                    type: type,
+                    categoryId: categoryId,
+                    limit: limit,
+                    createdAt: now,
+                    updatedAt: now
+                )
+            )
+        }
+        persistBudgets()
+    }
+
+    func deleteBudget(_ budget: Budget) {
+        budgets.removeAll(where: { $0.id == budget.id })
+        persistBudgets()
+    }
+
+    func budgetUsages(inMonth month: Date, type: TransactionType) -> [BudgetUsage] {
+        let monthBudgets = budgets
+            .filter { Calendar.current.isDate($0.month, equalTo: month, toGranularity: .month) && $0.type == type }
+
+        guard !monthBudgets.isEmpty else { return [] }
+        let monthTransactions = transactions(inMonth: month).filter { $0.type == type }
+
+        return monthBudgets
+            .map { budget in
+                let spent: Decimal
+                if let categoryId = budget.categoryId {
+                    spent = monthTransactions
+                        .filter { $0.categoryId == categoryId }
+                        .reduce(Decimal(0)) { $0 + $1.amount }
+                } else {
+                    spent = monthTransactions.reduce(Decimal(0)) { $0 + $1.amount }
+                }
+                return BudgetUsage(budget: budget, spent: spent)
+            }
+            .sorted(by: { $0.budget.limit > $1.budget.limit })
+    }
+
+    func addRecurringTransaction(
+        type: TransactionType,
+        amount: Decimal,
+        categoryId: UUID,
+        accountId: UUID,
+        note: String?,
+        frequency: RecurringTransaction.Frequency,
+        startDate: Date,
+        endDate: Date?
+    ) {
+        guard amount > 0 else { return }
+        guard category(for: categoryId)?.type == type else { return }
+        guard account(for: accountId) != nil else { return }
+
+        let now = Date()
+        let recurring = RecurringTransaction(
+            id: UUID(),
+            type: type,
+            amount: amount,
+            categoryId: categoryId,
+            accountId: accountId,
+            note: note?.nilIfEmpty,
+            frequency: frequency,
+            startDate: startDate,
+            endDate: endDate,
+            lastGeneratedAt: nil,
+            isEnabled: true,
+            createdAt: now,
+            updatedAt: now
+        )
+        recurringTransactions.append(recurring)
+        persistRecurringTransactions()
+        applyRecurringTransactionsIfNeeded()
+    }
+
+    func toggleRecurringTransaction(_ recurring: RecurringTransaction, isEnabled: Bool) {
+        guard let index = recurringTransactions.firstIndex(where: { $0.id == recurring.id }) else { return }
+        recurringTransactions[index].isEnabled = isEnabled
+        recurringTransactions[index].updatedAt = Date()
+        persistRecurringTransactions()
+
+        if isEnabled {
+            applyRecurringTransactionsIfNeeded()
+        }
+    }
+
+    func deleteRecurringTransactions(ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        let idSet = Set(ids)
+        recurringTransactions.removeAll(where: { idSet.contains($0.id) })
+        persistRecurringTransactions()
     }
 
     func deleteTransactions(at offsets: IndexSet) {
@@ -190,6 +418,11 @@ final class BillsStore: ObservableObject {
             .map { $0 }
     }
 
+    func categoryName(for categoryId: UUID?) -> String {
+        guard let categoryId else { return "全部分类" }
+        return category(for: categoryId)?.name ?? "未知分类"
+    }
+
     func exportTransactionsCSV() throws -> URL {
         let iso = ISO8601DateFormatter()
         var lines: [String] = []
@@ -229,6 +462,125 @@ final class BillsStore: ObservableObject {
 
     private func persistAccounts() {
         accountsStore.save(accounts)
+    }
+
+    private func persistBudgets() {
+        budgetsStore.save(budgets)
+    }
+
+    private func persistTransfers() {
+        transfersStore.save(transfers)
+    }
+
+    private func persistRecurringTransactions() {
+        recurringTransactionsStore.save(recurringTransactions)
+    }
+
+    private func ensureBuiltInAccounts() {
+        let existing = Set(accounts.map(\.id))
+        var changed = false
+        for account in DefaultData.accounts where !existing.contains(account.id) {
+            accounts.append(account)
+            changed = true
+        }
+
+        if changed {
+            persistAccounts()
+        }
+    }
+
+    private func applyRecurringTransactionsIfNeeded(referenceDate: Date = Date()) {
+        guard !recurringTransactions.isEmpty else { return }
+        var transactionsChanged = false
+        var recurringChanged = false
+        let calendar = Calendar.current
+
+        for index in recurringTransactions.indices {
+            var recurring = recurringTransactions[index]
+            guard recurring.isEnabled else { continue }
+
+            let start = recurring.startDate.startOfDay(using: calendar)
+            if let endDate = recurring.endDate, start > endDate {
+                continue
+            }
+
+            let firstTarget: Date
+            if let last = recurring.lastGeneratedAt {
+                firstTarget = nextDate(after: last, frequency: recurring.frequency, calendar: calendar)
+            } else {
+                firstTarget = start
+            }
+
+            var cursor = firstTarget
+            var lastGeneratedDate: Date?
+            var didGenerate = false
+            while cursor <= referenceDate {
+                if let endDate = recurring.endDate, cursor > endDate {
+                    break
+                }
+
+                if !hasTransactionGenerated(by: recurring.id, on: cursor, calendar: calendar) {
+                    let generatedNote = [recurring.note, "[周期:", recurring.id.uuidString, "]"]
+                        .compactMap { $0 }
+                        .joined(separator: "")
+
+                    let transaction = Transaction(
+                        id: UUID(),
+                        type: recurring.type,
+                        amount: recurring.amount,
+                        date: cursor,
+                        categoryId: recurring.categoryId,
+                        accountId: recurring.accountId,
+                        note: generatedNote.nilIfEmpty,
+                        createdAt: Date(),
+                        updatedAt: Date()
+                    )
+                    transactions.insert(transaction, at: 0)
+                    transactionsChanged = true
+                    didGenerate = true
+                    lastGeneratedDate = cursor
+                }
+                cursor = nextDate(after: cursor, frequency: recurring.frequency, calendar: calendar)
+            }
+
+            if didGenerate, let lastGeneratedDate {
+                recurring.lastGeneratedAt = lastGeneratedDate
+                recurring.updatedAt = Date()
+                recurringTransactions[index] = recurring
+                recurringChanged = true
+            }
+        }
+
+        if transactionsChanged {
+            persistTransactions()
+        }
+        if recurringChanged {
+            persistRecurringTransactions()
+        }
+    }
+
+    private func nextDate(after date: Date, frequency: RecurringTransaction.Frequency, calendar: Calendar) -> Date {
+        let component: Calendar.Component
+        let value: Int
+        switch frequency {
+        case .daily:
+            component = .day
+            value = 1
+        case .weekly:
+            component = .weekOfYear
+            value = 1
+        case .monthly:
+            component = .month
+            value = 1
+        }
+        return calendar.date(byAdding: component, value: value, to: date) ?? date
+    }
+
+    private func hasTransactionGenerated(by recurringId: UUID, on date: Date, calendar: Calendar) -> Bool {
+        let marker = "[周期:\(recurringId.uuidString)]"
+        return transactions.contains(where: {
+            calendar.isDate($0.date, inSameDayAs: date) && ($0.note?.contains(marker) ?? false)
+        })
     }
 
     private func moveItems<T>(_ array: inout [T], from source: IndexSet, to destination: Int) {

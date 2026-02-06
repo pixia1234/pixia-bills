@@ -16,6 +16,24 @@ struct SettingsView: View {
                         Label("分类管理", systemImage: "square.grid.2x2")
                     }
 
+                    NavigationLink {
+                        BudgetsView()
+                    } label: {
+                        Label("预算", systemImage: "chart.pie")
+                    }
+
+                    NavigationLink {
+                        AccountsView()
+                    } label: {
+                        Label("账户与转账", systemImage: "creditcard")
+                    }
+
+                    NavigationLink {
+                        RecurringTransactionsView()
+                    } label: {
+                        Label("周期记账", systemImage: "repeat")
+                    }
+
                     Button {
                         do {
                             exportURL = IdentifiableURL(url: try store.exportTransactionsCSV())
@@ -27,7 +45,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(header: Text("同步（第二阶段）")) {
+                Section(header: Text("其他（第二阶段）")) {
                     Toggle("iCloud 同步", isOn: .constant(false))
                         .disabled(true)
                     Toggle("FaceID/TouchID 解锁", isOn: .constant(false))
@@ -44,14 +62,4 @@ struct SettingsView: View {
             }
         }
     }
-}
-
-private struct IdentifiableMessage: Identifiable {
-    let id = UUID()
-    let message: String
-}
-
-private struct IdentifiableURL: Identifiable {
-    let id = UUID()
-    let url: URL
 }

@@ -239,3 +239,28 @@
 
 最低支持ios版本 ios15
 
+---
+
+## CI：GitHub Actions 产出未签名 IPA
+
+仓库内置了 GitHub Actions 工作流：`.github/workflows/ios-unsigned-ipa.yml`。
+
+- 触发：`push(main)` / `pull_request` / 手动触发
+- 触发：`push(main)` / `pull_request` / `push tag(v*)` / 手动触发
+- 平台：`macos-14`
+- 产物：`build/pixia-bills-<版本号>.ipa`
+
+版本号来源（优先级）：
+
+1. 手动触发输入的 `version`
+2. Git tag（如 `v0.1.0` 会解析为 `0.1.0`）
+3. `project.yml` 中的 `MARKETING_VERSION`
+
+本地命令（macOS + Xcode 环境）：
+
+```bash
+brew install xcodegen
+./scripts/build_unsigned_ipa.sh 0.1.0
+```
+
+说明：当前产物为 **未签名 IPA**，用于 CI 验证与归档，不可直接安装到真机发布。

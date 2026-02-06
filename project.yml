@@ -1,0 +1,34 @@
+name: PixiaBills
+
+options:
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.pixia.bills
+    SWIFT_VERSION: "5.0"
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+    INFOPLIST_KEY_CFBundleDisplayName: pixia-bills
+    INFOPLIST_KEY_CFBundleShortVersionString: 0.1.0
+    INFOPLIST_KEY_CFBundleVersion: 1
+    INFOPLIST_KEY_UIApplicationSceneManifest_Generation: true
+    INFOPLIST_KEY_UILaunchScreen_Generation: true
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  PixiaBills:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: PixiaBills
+    settings:
+      base:
+        PRODUCT_NAME: PixiaBills
+        CODE_SIGN_STYLE: Automatic
+    scheme:
+      gatherCoverageData: false
+

@@ -1,0 +1,69 @@
+name: iOS Unsigned IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional version override (e.g. 0.1.0)
+        required: false
+        type: string
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=""
+          input_version="${{ github.event.inputs.version || '' }}"
+
+          if [[ -n "$input_version" ]]; then
+            version="$input_version"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(grep -E 'MARKETING_VERSION:' project.yml | head -n 1 | awk '{print $2}')"
+          fi
+
+          if [[ -z "$version" ]]; then
+            echo "Cannot resolve app version"
+            exit 1
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version format: $version"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $version"
+
+      - name: Build unsigned IPA
+        run: ./scripts/build_unsigned_ipa.sh ${{ steps.version.outputs.version }}
+
+      - name: Verify output
+        run: ls -lah build/pixia-bills-${{ steps.version.outputs.version }}.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixia-bills-${{ steps.version.outputs.version }}
+          path: build/pixia-bills-${{ steps.version.outputs.version }}.ipa
+          if-no-files-found: error

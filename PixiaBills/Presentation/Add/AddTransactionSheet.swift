@@ -16,6 +16,7 @@ struct AddTransactionSheet: View {
     @State private var amountText: String = ""
     @State private var note: String = ""
     @State private var date: Date = Date()
+    @State private var accountId: UUID?
 
     var body: some View {
         NavigationView {
@@ -34,6 +35,8 @@ struct AddTransactionSheet: View {
                     AmountInputStep(
                         type: type,
                         category: selectedCategory,
+                        accounts: store.accounts,
+                        accountId: $accountId,
                         amountText: $amountText,
                         note: $note,
                         date: $date,
@@ -67,20 +70,10 @@ struct AddTransactionSheet: View {
             amount: amount,
             date: date,
             categoryId: category.id,
-            accountId: store.defaultAccountId,
+            accountId: accountId ?? store.defaultAccountId,
             note: note
         )
         dismiss()
-    }
-}
-
-private enum DecimalParser {
-    static func parse(_ text: String) -> Decimal? {
-        let sanitized = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: ",", with: ".")
-        guard !sanitized.isEmpty else { return nil }
-        return Decimal(string: sanitized, locale: Locale(identifier: "en_US_POSIX"))
     }
 }
 
@@ -147,6 +140,8 @@ private struct CategoryPickerStep: View {
 private struct AmountInputStep: View {
     let type: TransactionType
     let category: Category?
+    let accounts: [Account]
+    @Binding var accountId: UUID?
     @Binding var amountText: String
     @Binding var note: String
     @Binding var date: Date
@@ -205,6 +200,18 @@ private struct AmountInputStep: View {
                     DatePicker("", selection: $date, displayedComponents: [.date])
                         .labelsHidden()
                 }
+
+                if !accounts.isEmpty {
+                    Picker("账户", selection: Binding<UUID>(
+                        get: { accountId ?? accounts.first?.id ?? UUID() },
+                        set: { accountId = $0 }
+                    )) {
+                        ForEach(accounts) { account in
+                            Text(account.name).tag(account.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
             }
             .padding(.horizontal, 16)
 
@@ -213,6 +220,11 @@ private struct AmountInputStep: View {
             AmountKeypad(text: $amountText)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 12)
+        }
+        .onAppear {
+            if accountId == nil {
+                accountId = accounts.first?.id
+            }
         }
     }
 }
@@ -274,4 +286,3 @@ private struct KeyButton: View {
         .buttonStyle(.plain)
     }
 }
-
