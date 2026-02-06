@@ -40,9 +40,6 @@ final class BillsStore: ObservableObject {
         load()
     }
 
-    deinit {
-        stopObservingICloud()
-    }
 
     var defaultAccountId: UUID {
         accounts.first?.id ?? DefaultData.accounts[0].id
@@ -852,7 +849,9 @@ final class BillsStore: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            self.pullSnapshotFromICloud(force: true)
+            Task { @MainActor in
+                _ = self.pullSnapshotFromICloud(force: true)
+            }
         }
     }
 
