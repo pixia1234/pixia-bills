@@ -78,6 +78,11 @@ final class BillsStore: ObservableObject {
     private var webDAVConfiguration = WebDAVSyncConfiguration()
     private let webDAVClient = WebDAVClient()
 
+    private var webDAVAutoSyncTask: Task<Void, Never>?
+    private var webDAVAutoSyncToken = UUID()
+    private var webDAVAutoSyncTrigger: String?
+    private var webDAVAutoSyncDebounceNanoseconds: UInt64 = 900_000_000
+
     init() {
         load()
     }
@@ -111,6 +116,21 @@ final class BillsStore: ObservableObject {
         webDAVConfiguration = configuration
     }
 
+    func requestAutoWebDAVSync(trigger: String = "自动同步", debounceNanoseconds: UInt64 = 900_000_000) {
+        guard iCloudSyncEnabled else { return }
+        guard !isApplyingICloudSnapshot else { return }
+
+        webDAVAutoSyncTrigger = trigger
+        webDAVAutoSyncDebounceNanoseconds = debounceNanoseconds
+        webDAVAutoSyncToken = UUID()
+
+        if webDAVAutoSyncTask == nil {
+            webDAVAutoSyncTask = Task { @MainActor [weak self] in
+                await self?.runWebDAVAutoSyncWorker()
+            }
+        }
+    }
+
     func setICloudSyncEnabled(_ enabled: Bool) {
         if enabled {
             addICloudLog("开始启用 WebDAV 同步")
@@ -127,6 +147,9 @@ final class BillsStore: ObservableObject {
             }
         } else {
             iCloudSyncEnabled = false
+            webDAVAutoSyncTrigger = nil
+            webDAVAutoSyncTask?.cancel()
+            webDAVAutoSyncTask = nil
             iCloudSyncStatus = "未开启"
             addICloudLog("已关闭 WebDAV 同步")
         }
@@ -237,6 +260,41 @@ final class BillsStore: ObservableObject {
         } catch {
             iCloudSyncStatus = "同步失败"
             addICloudLog("首次开启：WebDAV 连接失败（\(error.localizedDescription)）")
+        }
+    }
+
+    private func runWebDAVAutoSyncWorker() async {
+        defer {
+            webDAVAutoSyncTask = nil
+        }
+
+        while iCloudSyncEnabled {
+            guard verifyWebDAVConfiguration(logFailures: false) else {
+                iCloudSyncStatus = "配置不完整"
+                break
+            }
+
+            guard let trigger = webDAVAutoSyncTrigger else {
+                break
+            }
+
+            let token = webDAVAutoSyncToken
+            do {
+                try await Task.sleep(nanoseconds: webDAVAutoSyncDebounceNanoseconds)
+            } catch {
+                break
+            }
+
+            if !iCloudSyncEnabled {
+                break
+            }
+
+            if token != webDAVAutoSyncToken {
+                continue
+            }
+
+            webDAVAutoSyncTrigger = nil
+            _ = await syncSnapshotWithWebDAV(trigger: trigger)
         }
     }
 
@@ -788,32 +846,32 @@ final class BillsStore: ObservableObject {
 
     private func persistTransactions() {
         transactionsStore.save(transactions)
-        pushSnapshotToICloudIfNeeded()
+        scheduleWebDAVSyncIfNeeded()
     }
 
     private func persistCategories() {
         categoriesStore.save(categories)
-        pushSnapshotToICloudIfNeeded()
+        scheduleWebDAVSyncIfNeeded()
     }
 
     private func persistAccounts() {
         accountsStore.save(accounts)
-        pushSnapshotToICloudIfNeeded()
+        scheduleWebDAVSyncIfNeeded()
     }
 
     private func persistBudgets() {
         budgetsStore.save(budgets)
-        pushSnapshotToICloudIfNeeded()
+        scheduleWebDAVSyncIfNeeded()
     }
 
     private func persistTransfers() {
         transfersStore.save(transfers)
-        pushSnapshotToICloudIfNeeded()
+        scheduleWebDAVSyncIfNeeded()
     }
 
     private func persistRecurringTransactions() {
         recurringTransactionsStore.save(recurringTransactions)
-        pushSnapshotToICloudIfNeeded()
+        scheduleWebDAVSyncIfNeeded()
     }
 
     private func ensureBuiltInAccounts() {
@@ -1086,13 +1144,46 @@ final class BillsStore: ObservableObject {
         }
     }
 
-    private func pushSnapshotToICloudIfNeeded() {
-        guard iCloudSyncEnabled else { return }
-        guard !isApplyingICloudSnapshot else { return }
+    private func scheduleWebDAVSyncIfNeeded() {
+        requestAutoWebDAVSync(trigger: "本地变更")
+    }
 
-        let snapshot = localSnapshot(syncedAt: Date())
-        Task { @MainActor in
-            _ = await pushSnapshotToICloud(trigger: "自动推送", snapshot: snapshot)
+    @discardableResult
+    private func syncSnapshotWithWebDAV(trigger: String) async -> Bool {
+        guard iCloudSyncEnabled else { return false }
+        guard verifyWebDAVConfiguration(logFailures: true) else {
+            iCloudSyncStatus = "配置不完整"
+            return false
+        }
+        guard let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
+            return false
+        }
+
+        iCloudSyncStatus = "同步中"
+
+        do {
+            let remoteData = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
+            if let remoteData {
+                guard !remoteData.isEmpty else {
+                    throw WebDAVSyncError.emptyRemotePayload
+                }
+
+                let decrypted = try decryptSnapshot(remoteData)
+                let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: decrypted)
+                let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
+                applyICloudSnapshot(merged)
+                addICloudLog("\(trigger)：已合并本地与云端")
+                return await pushSnapshotToICloud(trigger: "\(trigger)后回写", snapshot: merged)
+            }
+
+            let snapshot = localSnapshot(syncedAt: Date())
+            return await pushSnapshotToICloud(trigger: "\(trigger)：云端无文件，已创建", snapshot: snapshot)
+        } catch {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：WebDAV 同步失败（\(error.localizedDescription)）")
+            return false
         }
     }
 

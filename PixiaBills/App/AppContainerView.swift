@@ -36,27 +36,30 @@ struct AppContainerView: View {
         .onChange(of: settings.webDAVSyncEnabled) { enabled in
             store.updateWebDAVConfiguration(settings.webDAVConfiguration)
             store.setICloudSyncEnabled(enabled)
+            if enabled {
+                store.requestAutoWebDAVSync(trigger: "开启同步")
+            }
         }
         .onChange(of: settings.webDAVScheme) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.webDAVHost) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.webDAVPort) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.webDAVPath) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.webDAVUsername) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.webDAVPassword) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.webDAVEncryptionKey) { _ in
-            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            refreshWebDAVConfigurationAndScheduleSync(trigger: "配置变更")
         }
         .onChange(of: settings.biometricLockEnabled) { enabled in
             lockManager.setEnabled(enabled)
@@ -69,6 +72,7 @@ struct AppContainerView: View {
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .active:
+                store.requestAutoWebDAVSync(trigger: "应用回到前台", debounceNanoseconds: 100_000_000)
                 Task {
                     await lockManager.unlockIfNeeded()
                 }
@@ -78,6 +82,12 @@ struct AppContainerView: View {
                 break
             }
         }
+    }
+
+    private func refreshWebDAVConfigurationAndScheduleSync(trigger: String) {
+        store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        guard settings.webDAVSyncEnabled else { return }
+        store.requestAutoWebDAVSync(trigger: trigger, debounceNanoseconds: 300_000_000)
     }
 }
 

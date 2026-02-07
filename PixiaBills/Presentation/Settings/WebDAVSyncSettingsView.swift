@@ -56,7 +56,7 @@ struct WebDAVSyncSettingsView: View {
                 }
             }
 
-            Section(header: Text("手动同步"), footer: Text("建议：首次使用先“检查状态”，再“拉取并合并”或“推送”。")) {
+            Section(header: Text("手动同步"), footer: Text("开启 WebDAV 同步后，应用会在本地变更、配置更新和回到前台时自动拉取合并并回写。以下按钮用于手动排查与强制同步。")) {
                 Button {
                     Task {
                         let text = await store.refreshICloudSyncStatusNow(configuration: settings.webDAVConfiguration)
