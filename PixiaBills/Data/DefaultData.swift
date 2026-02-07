@@ -30,7 +30,9 @@ enum DefaultData {
                 name: name,
                 iconName: icon,
                 sortOrder: order,
-                isDefault: true
+                isDefault: true,
+                createdAt: bootstrapDate,
+                updatedAt: bootstrapDate
             )
         }
 
@@ -41,7 +43,9 @@ enum DefaultData {
                 name: name,
                 iconName: icon,
                 sortOrder: order,
-                isDefault: true
+                isDefault: true,
+                createdAt: bootstrapDate,
+                updatedAt: bootstrapDate
             )
         }
 
