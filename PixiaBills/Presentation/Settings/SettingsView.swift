@@ -56,12 +56,12 @@ struct SettingsView: View {
                 }
 
                 Section(header: Text("同步与安全")) {
-                    Toggle("iCloud 云盘同步", isOn: Binding(
-                        get: { settings.iCloudSyncEnabled },
-                        set: { settings.iCloudSyncEnabled = $0 }
+                    Toggle("WebDAV 同步", isOn: Binding(
+                        get: { settings.webDAVSyncEnabled },
+                        set: { settings.webDAVSyncEnabled = $0 }
                     ))
 
-                    if settings.iCloudSyncEnabled {
+                    if settings.webDAVSyncEnabled {
                         HStack {
                             Text("状态")
                                 .foregroundColor(.secondary)
@@ -79,30 +79,12 @@ struct SettingsView: View {
                                     .foregroundColor(.secondary)
                             }
                         }
+                    }
 
-                        Button {
-                            alertMessage = IdentifiableMessage(message: store.refreshICloudSyncStatusNow())
-                        } label: {
-                            Label("检查同步状态", systemImage: "waveform.path.ecg")
-                        }
-
-                        Button {
-                            alertMessage = IdentifiableMessage(message: store.pullFromICloudNow())
-                        } label: {
-                            Label("立即拉取并合并", systemImage: "arrow.down.circle")
-                        }
-
-                        Button {
-                            alertMessage = IdentifiableMessage(message: store.pushToICloudNow())
-                        } label: {
-                            Label("立即推送", systemImage: "arrow.up.circle")
-                        }
-
-                        NavigationLink {
-                            ICloudSyncLogsView()
-                        } label: {
-                            Label("同步日志", systemImage: "text.justify")
-                        }
+                    NavigationLink {
+                        WebDAVSyncSettingsView()
+                    } label: {
+                        Label("WebDAV 配置与手动同步", systemImage: "externaldrive.badge.wifi")
                     }
 
                     Toggle("FaceID/TouchID 解锁", isOn: Binding(

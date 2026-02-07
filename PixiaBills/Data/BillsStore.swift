@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 @MainActor
 final class BillsStore: ObservableObject {
@@ -18,10 +19,6 @@ final class BillsStore: ObservableObject {
     private let budgetsStore = JSONFileStore(filename: "budgets.json")
     private let transfersStore = JSONFileStore(filename: "transfers.json")
     private let recurringTransactionsStore = JSONFileStore(filename: "recurring-transactions.json")
-
-    private enum ICloudKeys {
-        static let snapshotFilename = "pixia-bills-sync.json"
-    }
 
     private struct ICloudSnapshot: Codable {
         let syncedAt: Date
@@ -44,6 +41,27 @@ final class BillsStore: ObservableObject {
         }
     }
 
+
+    private enum WebDAVSyncError: LocalizedError {
+        case invalidConfiguration(String)
+        case encryptionFailed
+        case decryptionFailed
+        case emptyRemotePayload
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidConfiguration(let message):
+                return message
+            case .encryptionFailed:
+                return "数据加密失败，请检查加密密钥"
+            case .decryptionFailed:
+                return "数据解密失败，请确认加密密钥是否一致"
+            case .emptyRemotePayload:
+                return "云端文件为空"
+            }
+        }
+    }
+
     struct ICloudSyncLog: Identifiable {
         let id = UUID()
         let date: Date
@@ -57,8 +75,8 @@ final class BillsStore: ObservableObject {
 
     private var iCloudSyncEnabled = false
     private var isApplyingICloudSnapshot = false
-    private var iCloudMetadataQuery: NSMetadataQuery?
-    private var iCloudMetadataObservers: [NSObjectProtocol] = []
+    private var webDAVConfiguration = WebDAVSyncConfiguration()
+    private let webDAVClient = WebDAVClient()
 
     init() {
         load()
@@ -89,87 +107,118 @@ final class BillsStore: ObservableObject {
         applyRecurringTransactionsIfNeeded()
     }
 
+    func updateWebDAVConfiguration(_ configuration: WebDAVSyncConfiguration) {
+        webDAVConfiguration = configuration
+    }
+
     func setICloudSyncEnabled(_ enabled: Bool) {
         if enabled {
-            addICloudLog("开始启用 iCloud 云盘同步")
+            addICloudLog("开始启用 WebDAV 同步")
             iCloudSyncStatus = "检测中"
 
-            guard verifyICloudAvailability() else {
+            guard verifyWebDAVConfiguration(logFailures: true) else {
                 iCloudSyncEnabled = false
-                stopObservingICloud()
                 return
             }
 
             iCloudSyncEnabled = true
-            startObservingICloudIfNeeded()
-
-            iCloudSyncStatus = "同步中"
-            if hasRemoteSnapshot() {
-                _ = pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "首次开启")
-            } else {
-                _ = pushSnapshotToICloud(trigger: "首次开启")
+            Task { @MainActor in
+                await enableWebDAVSyncFlow()
             }
         } else {
             iCloudSyncEnabled = false
-            stopObservingICloud()
             iCloudSyncStatus = "未开启"
-            addICloudLog("已关闭 iCloud 同步")
+            addICloudLog("已关闭 WebDAV 同步")
         }
     }
 
+    func setICloudSyncEnabled(_ enabled: Bool, configuration: WebDAVSyncConfiguration) {
+        updateWebDAVConfiguration(configuration)
+        setICloudSyncEnabled(enabled)
+    }
+
     @discardableResult
-    func refreshICloudSyncStatusNow() -> String {
-        guard verifyICloudAvailability() else {
+    func refreshICloudSyncStatusNow() async -> String {
+        guard verifyWebDAVConfiguration(logFailures: true) else {
             iCloudSyncEnabled = false
-            return "未检测到 iCloud 云盘可用环境，请先登录 iCloud 并开启 iCloud Drive"
+            return "WebDAV 配置不完整，请先填写协议/地址/路径/加密密钥"
         }
 
         iCloudSyncEnabled = true
-        startObservingICloudIfNeeded()
-
-        if hasRemoteSnapshot() {
+        let hasRemote = await hasRemoteSnapshot()
+        if hasRemote {
             iCloudSyncStatus = "已连接"
-            addICloudLog("状态检查：iCloud 云盘连接正常，已检测到同步文件")
-            return "iCloud 云盘连接正常，已检测到同步文件"
+            addICloudLog("状态检查：WebDAV 连接正常，已检测到云端文件")
+            return "WebDAV 连接正常，已检测到云端文件"
         }
 
         iCloudSyncStatus = "已连接"
-        addICloudLog("状态检查：iCloud 云盘连接正常，但暂无同步文件")
-        return "iCloud 云盘连接正常，但云端暂无同步文件"
+        addICloudLog("状态检查：WebDAV 连接正常，但云端暂无文件")
+        return "WebDAV 连接正常，但云端暂无文件"
     }
 
     @discardableResult
-    func pullFromICloudNow() -> String {
-        guard verifyICloudAvailability() else {
+    func refreshICloudSyncStatusNow(configuration: WebDAVSyncConfiguration) async -> String {
+        updateWebDAVConfiguration(configuration)
+        return await refreshICloudSyncStatusNow()
+    }
+
+    @discardableResult
+    func pullFromICloudNow() async -> String {
+        guard verifyWebDAVConfiguration(logFailures: true) else {
             iCloudSyncEnabled = false
-            return "未检测到 iCloud 云盘可用环境，请先登录 iCloud 并开启 iCloud Drive"
+            return "WebDAV 配置不完整，请先填写协议/地址/路径/加密密钥"
         }
 
         iCloudSyncEnabled = true
-        startObservingICloudIfNeeded()
-
         iCloudSyncStatus = "同步中"
-        let success = pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "手动拉取")
+        let success = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "手动拉取")
         return success ? "拉取成功，已自动合并本地与云端数据" : "拉取失败，请查看同步日志"
     }
 
     @discardableResult
-    func pushToICloudNow() -> String {
-        guard verifyICloudAvailability() else {
+    func pullFromICloudNow(configuration: WebDAVSyncConfiguration) async -> String {
+        updateWebDAVConfiguration(configuration)
+        return await pullFromICloudNow()
+    }
+
+    @discardableResult
+    func pushToICloudNow() async -> String {
+        guard verifyWebDAVConfiguration(logFailures: true) else {
             iCloudSyncEnabled = false
-            return "未检测到 iCloud 云盘可用环境，请先登录 iCloud 并开启 iCloud Drive"
+            return "WebDAV 配置不完整，请先填写协议/地址/路径/加密密钥"
         }
 
         iCloudSyncEnabled = true
-        startObservingICloudIfNeeded()
-
         iCloudSyncStatus = "同步中"
-        let success = pushSnapshotToICloud(trigger: "手动推送")
+        let success = await pushSnapshotToICloud(trigger: "手动推送")
         return success ? "推送成功，云端数据已更新" : "推送失败，请查看同步日志"
+    }
+
+    @discardableResult
+    func pushToICloudNow(configuration: WebDAVSyncConfiguration) async -> String {
+        updateWebDAVConfiguration(configuration)
+        return await pushToICloudNow()
     }
 
     func clearICloudSyncLogs() {
         iCloudSyncLogs.removeAll()
+    }
+
+    private func enableWebDAVSyncFlow() async {
+        guard iCloudSyncEnabled else { return }
+        guard verifyWebDAVConfiguration(logFailures: true) else {
+            iCloudSyncEnabled = false
+            return
+        }
+
+        iCloudSyncStatus = "同步中"
+        let hasRemote = await hasRemoteSnapshot()
+        if hasRemote {
+            _ = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "首次开启")
+        } else {
+            _ = await pushSnapshotToICloud(trigger: "首次开启")
+        }
     }
 
 
@@ -1021,100 +1070,71 @@ final class BillsStore: ObservableObject {
     private func pushSnapshotToICloudIfNeeded() {
         guard iCloudSyncEnabled else { return }
         guard !isApplyingICloudSnapshot else { return }
-        _ = pushSnapshotToICloud(trigger: "自动推送")
+
+        let snapshot = localSnapshot(syncedAt: Date())
+        Task { @MainActor in
+            _ = await pushSnapshotToICloud(trigger: "自动推送", snapshot: snapshot)
+        }
     }
 
     @discardableResult
-    private func pushSnapshotToICloud(trigger: String, snapshot: ICloudSnapshot? = nil) -> Bool {
+    private func pushSnapshotToICloud(trigger: String, snapshot: ICloudSnapshot? = nil) async -> Bool {
         guard iCloudSyncEnabled else { return false }
-        guard verifyICloudAvailability() else {
+        guard verifyWebDAVConfiguration(logFailures: true) else {
             iCloudSyncEnabled = false
             return false
         }
-
-        guard let snapshotURL = resolveICloudSnapshotFileURL(createIfNeeded: true) else {
-            iCloudSyncStatus = "同步不可用"
-            addICloudLog("\(trigger)：无法定位 iCloud 云盘同步目录")
+        guard let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
             return false
         }
 
         let snapshot = snapshot ?? localSnapshot(syncedAt: Date())
 
         do {
-            let data = try JSONEncoder.appEncoder.encode(snapshot)
-
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            var coordinationError: NSError?
-            var writeError: Error?
-            coordinator.coordinate(writingItemAt: snapshotURL, options: .forReplacing, error: &coordinationError) { url in
-                do {
-                    try data.write(to: url, options: .atomic)
-                } catch {
-                    writeError = error
-                }
-            }
-
-            if let coordinationError {
-                throw coordinationError
-            }
-            if let writeError {
-                throw writeError
-            }
+            let encoded = try JSONEncoder.appEncoder.encode(snapshot)
+            let encrypted = try encryptSnapshot(encoded)
+            try await webDAVClient.upload(data: encrypted, url: snapshotURL, configuration: webDAVConfiguration)
 
             iCloudLastSyncedAt = snapshot.syncedAt
             iCloudSyncStatus = "已开启"
-            addICloudLog("\(trigger)：已写入 iCloud 云盘文件")
+            addICloudLog("\(trigger)：WebDAV 推送成功")
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：写入失败（\(error.localizedDescription)）")
+            addICloudLog("\(trigger)：WebDAV 推送失败（\(error.localizedDescription)）")
             return false
         }
     }
 
     @discardableResult
-    private func pullSnapshotFromICloud(mode: ICloudPullMode, trigger: String) -> Bool {
+    private func pullSnapshotFromICloud(mode: ICloudPullMode, trigger: String) async -> Bool {
         guard iCloudSyncEnabled else { return false }
-        guard verifyICloudAvailability() else {
+        guard verifyWebDAVConfiguration(logFailures: true) else {
             iCloudSyncEnabled = false
             return false
         }
-
-        guard let snapshotURL = resolveICloudSnapshotFileURL(createIfNeeded: false, logFailures: false) else {
-            iCloudSyncStatus = "云端暂无数据"
-            addICloudLog("\(trigger)：云端暂无同步文件")
+        guard let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
             return false
         }
 
         do {
-            try ensureICloudFileDownloadedIfNeeded(snapshotURL)
-
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            var coordinationError: NSError?
-            var readError: Error?
-            var fileData: Data?
-
-            coordinator.coordinate(readingItemAt: snapshotURL, options: [], error: &coordinationError) { url in
-                do {
-                    fileData = try Data(contentsOf: url)
-                } catch {
-                    readError = error
-                }
-            }
-
-            if let coordinationError {
-                throw coordinationError
-            }
-            if let readError {
-                throw readError
-            }
-            guard let fileData, !fileData.isEmpty else {
+            let remoteData = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
+            guard let remoteData else {
                 iCloudSyncStatus = "云端暂无数据"
-                addICloudLog("\(trigger)：同步文件为空")
+                addICloudLog("\(trigger)：云端暂无同步文件")
                 return false
             }
 
-            let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: fileData)
+            guard !remoteData.isEmpty else {
+                throw WebDAVSyncError.emptyRemotePayload
+            }
+
+            let decrypted = try decryptSnapshot(remoteData)
+            let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: decrypted)
 
             switch mode {
             case .replaceLocal:
@@ -1124,14 +1144,14 @@ final class BillsStore: ObservableObject {
                 let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
                 applyICloudSnapshot(merged)
                 addICloudLog("\(trigger)：已合并本地与云端")
-                _ = pushSnapshotToICloud(trigger: "\(trigger)后回写", snapshot: merged)
+                _ = await pushSnapshotToICloud(trigger: "\(trigger)后回写", snapshot: merged)
             }
 
             iCloudSyncStatus = "已开启"
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：读取失败（\(error.localizedDescription)）")
+            addICloudLog("\(trigger)：WebDAV 拉取失败（\(error.localizedDescription)）")
             return false
         }
     }
@@ -1160,124 +1180,68 @@ final class BillsStore: ObservableObject {
         iCloudSyncStatus = "已开启"
     }
 
-    private func startObservingICloudIfNeeded() {
-        guard iCloudMetadataQuery == nil else { return }
+    private func hasRemoteSnapshot() async -> Bool {
+        guard let baseURL = webDAVConfiguration.baseURL else { return false }
 
-        let query = NSMetadataQuery()
-        query.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
-        query.predicate = NSPredicate(format: "%K == %@", NSMetadataItemFSNameKey, ICloudKeys.snapshotFilename)
-
-        let center = NotificationCenter.default
-        let finishObserver = center.addObserver(
-            forName: .NSMetadataQueryDidFinishGathering,
-            object: query,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            query.disableUpdates()
-            self.handleICloudMetadataUpdate(trigger: "初始索引")
-            query.enableUpdates()
-        }
-
-        let updateObserver = center.addObserver(
-            forName: .NSMetadataQueryDidUpdate,
-            object: query,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            query.disableUpdates()
-            self.handleICloudMetadataUpdate(trigger: "云端文件变更")
-            query.enableUpdates()
-        }
-
-        iCloudMetadataObservers = [finishObserver, updateObserver]
-        iCloudMetadataQuery = query
-        query.start()
-
-        addICloudLog("已启动 iCloud 云盘文件监听")
-    }
-
-    private func handleICloudMetadataUpdate(trigger: String) {
-        guard iCloudSyncEnabled else { return }
-        _ = pullSnapshotFromICloud(mode: .replaceLocal, trigger: trigger)
-    }
-
-    private func stopObservingICloud() {
-        if let query = iCloudMetadataQuery {
-            query.stop()
-        }
-        iCloudMetadataQuery = nil
-
-        let center = NotificationCenter.default
-        for observer in iCloudMetadataObservers {
-            center.removeObserver(observer)
-        }
-        iCloudMetadataObservers.removeAll()
-    }
-
-    private func hasRemoteSnapshot() -> Bool {
-        guard let snapshotURL = resolveICloudSnapshotFileURL(createIfNeeded: false, logFailures: false) else {
+        do {
+            try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
+            guard let snapshotURL = webDAVConfiguration.snapshotFileURL else { return false }
+            let data = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
+            return data != nil
+        } catch {
+            addICloudLog("状态检查：WebDAV 连接失败（\(error.localizedDescription)）")
             return false
         }
-        return FileManager.default.fileExists(atPath: snapshotURL.path)
     }
 
-    private func verifyICloudAvailability() -> Bool {
-        guard FileManager.default.ubiquityIdentityToken != nil else {
-            iCloudSyncStatus = "未登录 iCloud"
-            addICloudLog("未检测到 iCloud 账号，请在系统设置中登录后重试")
+    private func verifyWebDAVConfiguration(logFailures: Bool) -> Bool {
+        if webDAVConfiguration.baseURL == nil {
+            if logFailures {
+                iCloudSyncStatus = "配置不完整"
+                addICloudLog("请填写 WebDAV 协议、地址与路径")
+            }
             return false
         }
 
-        guard resolveICloudDocumentsURL(createIfNeeded: true, logFailures: true) != nil else {
-            iCloudSyncStatus = "云盘不可用"
-            addICloudLog("无法访问 iCloud 云盘容器，请检查 iCloud Drive 是否开启")
+        if webDAVConfiguration.normalizedEncryptionKey.isEmpty {
+            if logFailures {
+                iCloudSyncStatus = "配置不完整"
+                addICloudLog("请填写加密密钥（AES-256-GCM）")
+            }
             return false
         }
 
         return true
     }
 
-    private func resolveICloudSnapshotFileURL(createIfNeeded: Bool, logFailures: Bool = true) -> URL? {
-        guard let documentsURL = resolveICloudDocumentsURL(createIfNeeded: createIfNeeded, logFailures: logFailures) else {
-            return nil
+    private func encryptSnapshot(_ data: Data) throws -> Data {
+        let key = try derivedSymmetricKey()
+        let sealedBox = try AES.GCM.seal(data, using: key)
+        guard let combined = sealedBox.combined else {
+            throw WebDAVSyncError.encryptionFailed
         }
-        return documentsURL.appendingPathComponent(ICloudKeys.snapshotFilename)
+        return combined
     }
 
-    private func resolveICloudDocumentsURL(createIfNeeded: Bool, logFailures: Bool) -> URL? {
-        let fileManager = FileManager.default
-        guard let containerURL = fileManager.url(forUbiquityContainerIdentifier: nil) else {
-            if logFailures {
-                addICloudLog("未获取到 iCloud 云盘容器 URL")
-            }
-            return nil
-        }
+    private func decryptSnapshot(_ data: Data) throws -> Data {
+        let key = try derivedSymmetricKey()
 
-        let documentsURL = containerURL.appendingPathComponent("Documents", isDirectory: true)
-        if createIfNeeded, !fileManager.fileExists(atPath: documentsURL.path) {
-            do {
-                try fileManager.createDirectory(at: documentsURL, withIntermediateDirectories: true)
-            } catch {
-                if logFailures {
-                    addICloudLog("创建 iCloud 云盘目录失败（\(error.localizedDescription)）")
-                }
-                return nil
-            }
+        do {
+            let sealedBox = try AES.GCM.SealedBox(combined: data)
+            return try AES.GCM.open(sealedBox, using: key)
+        } catch {
+            throw WebDAVSyncError.decryptionFailed
         }
-
-        return documentsURL
     }
 
-    private func ensureICloudFileDownloadedIfNeeded(_ url: URL) throws {
-        let fileManager = FileManager.default
-        guard fileManager.isUbiquitousItem(at: url) else { return }
-
-        let values = try url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
-        if values.ubiquitousItemDownloadingStatus == .notDownloaded {
-            try fileManager.startDownloadingUbiquitousItem(at: url)
-            addICloudLog("正在从 iCloud 云盘下载最新同步文件")
+    private func derivedSymmetricKey() throws -> SymmetricKey {
+        let raw = webDAVConfiguration.normalizedEncryptionKey
+        guard !raw.isEmpty else {
+            throw WebDAVSyncError.invalidConfiguration("请填写加密密钥")
         }
+
+        let digest = SHA256.hash(data: Data(raw.utf8))
+        return SymmetricKey(data: Data(digest))
     }
 
     private func localSnapshot(syncedAt: Date) -> ICloudSnapshot {

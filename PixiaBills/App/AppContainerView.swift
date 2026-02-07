@@ -25,14 +25,38 @@ struct AppContainerView: View {
             }
         }
         .task {
-            store.setICloudSyncEnabled(settings.iCloudSyncEnabled)
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+            store.setICloudSyncEnabled(settings.webDAVSyncEnabled)
+
             lockManager.setEnabled(settings.biometricLockEnabled)
             if settings.biometricLockEnabled {
                 await lockManager.unlockIfNeeded()
             }
         }
-        .onChange(of: settings.iCloudSyncEnabled) { enabled in
+        .onChange(of: settings.webDAVSyncEnabled) { enabled in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
             store.setICloudSyncEnabled(enabled)
+        }
+        .onChange(of: settings.webDAVScheme) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        }
+        .onChange(of: settings.webDAVHost) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        }
+        .onChange(of: settings.webDAVPort) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        }
+        .onChange(of: settings.webDAVPath) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        }
+        .onChange(of: settings.webDAVUsername) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        }
+        .onChange(of: settings.webDAVPassword) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
+        }
+        .onChange(of: settings.webDAVEncryptionKey) { _ in
+            store.updateWebDAVConfiguration(settings.webDAVConfiguration)
         }
         .onChange(of: settings.biometricLockEnabled) { enabled in
             lockManager.setEnabled(enabled)
