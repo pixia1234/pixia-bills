@@ -1,18 +1,24 @@
 import Foundation
 
 enum DefaultData {
+    private static let bootstrapDate = Date(timeIntervalSince1970: 0)
+
     static let accounts: [Account] = [
         Account(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             name: "现金",
             type: .cash,
-            initialBalance: 0
+            initialBalance: 0,
+            createdAt: bootstrapDate,
+            updatedAt: bootstrapDate
         ),
         Account(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
             name: "储蓄卡",
             type: .bank,
-            initialBalance: 0
+            initialBalance: 0,
+            createdAt: bootstrapDate,
+            updatedAt: bootstrapDate
         )
     ]
 

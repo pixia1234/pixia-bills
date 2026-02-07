@@ -385,7 +385,12 @@ final class BillsStore: ObservableObject {
 
     func updateAccount(_ account: Account) {
         guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
-        accounts[index] = account
+
+        var updated = account
+        updated.createdAt = accounts[index].createdAt
+        updated.updatedAt = Date()
+
+        accounts[index] = updated
         persistAccounts()
     }
 
@@ -1378,7 +1383,7 @@ final class BillsStore: ObservableObject {
             .sorted(by: { $0.startDate > $1.startDate })
 
         let mergedCategories = mergeByIdentifierPreservingLocalOrder(local.categories, remote.categories)
-        let mergedAccounts = mergeByIdentifierPreservingLocalOrder(local.accounts, remote.accounts)
+        let mergedAccounts = mergeAccounts(local: local.accounts, remote: remote.accounts)
 
         return ICloudSnapshot(
             syncedAt: max(local.syncedAt, remote.syncedAt),
@@ -1389,6 +1394,39 @@ final class BillsStore: ObservableObject {
             transfers: mergedTransfers,
             recurringTransactions: mergedRecurring
         )
+    }
+
+    private func mergeAccounts(local: [Account], remote: [Account]) -> [Account] {
+        let merged = mergeByLatestUpdate(local, remote, updatedAt: \.updatedAt)
+
+        let localOrder = Dictionary(uniqueKeysWithValues: local.enumerated().map { ($1.id, $0) })
+        let remoteOrder = Dictionary(uniqueKeysWithValues: remote.enumerated().map { ($1.id, $0) })
+
+        return merged.sorted { lhs, rhs in
+            let lhsLocal = localOrder[lhs.id]
+            let rhsLocal = localOrder[rhs.id]
+
+            switch (lhsLocal, rhsLocal) {
+            case let (left?, right?):
+                if left != right {
+                    return left < right
+                }
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            case (nil, nil):
+                break
+            }
+
+            let lhsRemote = remoteOrder[lhs.id] ?? Int.max
+            let rhsRemote = remoteOrder[rhs.id] ?? Int.max
+            if lhsRemote != rhsRemote {
+                return lhsRemote < rhsRemote
+            }
+
+            return lhs.name.localizedCompare(rhs.name) == .orderedAscending
+        }
     }
 
     private func mergeByLatestUpdate<T: Identifiable>(
