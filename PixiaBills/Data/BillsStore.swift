@@ -709,23 +709,31 @@ final class BillsStore: ObservableObject {
 
     func deleteAccounts(ids: [UUID]) {
         guard !ids.isEmpty else { return }
+
         let usedIds = Set(
             transactions.map(\.accountId) +
             transfers.flatMap { [$0.fromAccountId, $0.toAccountId] } +
             recurringTransactions.map(\.accountId)
         )
 
-        let validDelete = ids.filter { id in
-            id != defaultAccountId && !usedIds.contains(id)
-        }
-        guard !validDelete.isEmpty else { return }
+        let existingIds = Set(accounts.map(\.id))
+        var deletableIds = Set(ids)
+            .intersection(existingIds)
+            .subtracting(usedIds)
 
-        let idSet = Set(validDelete)
+        guard !deletableIds.isEmpty else { return }
+
+        if deletableIds.count >= accounts.count, let keepId = accounts.first?.id {
+            deletableIds.remove(keepId)
+        }
+
+        guard !deletableIds.isEmpty else { return }
+
         let now = Date()
-        accounts.removeAll(where: { idSet.contains($0.id) })
+        accounts.removeAll(where: { deletableIds.contains($0.id) })
         deletedAccountMarkers = mergeDeletionMarkers(
             deletedAccountMarkers,
-            validDelete.map { EntityDeletionMarker(id: $0, deletedAt: now) }
+            deletableIds.map { EntityDeletionMarker(id: $0, deletedAt: now) }
         )
         persistAccounts()
         persistDeletionMarkers(scheduleSync: false)
