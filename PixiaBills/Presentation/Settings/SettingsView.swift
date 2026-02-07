@@ -79,6 +79,30 @@ struct SettingsView: View {
                                     .foregroundColor(.secondary)
                             }
                         }
+
+                        Button {
+                            alertMessage = IdentifiableMessage(message: store.refreshICloudSyncStatusNow())
+                        } label: {
+                            Label("检查同步状态", systemImage: "waveform.path.ecg")
+                        }
+
+                        Button {
+                            alertMessage = IdentifiableMessage(message: store.pullFromICloudNow())
+                        } label: {
+                            Label("立即拉取并合并", systemImage: "arrow.down.circle")
+                        }
+
+                        Button {
+                            alertMessage = IdentifiableMessage(message: store.pushToICloudNow())
+                        } label: {
+                            Label("立即推送", systemImage: "arrow.up.circle")
+                        }
+
+                        NavigationLink {
+                            ICloudSyncLogsView()
+                        } label: {
+                            Label("同步日志", systemImage: "text.justify")
+                        }
                     }
 
                     Toggle("FaceID/TouchID 解锁", isOn: Binding(

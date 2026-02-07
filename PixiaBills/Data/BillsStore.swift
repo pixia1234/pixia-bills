@@ -10,6 +10,7 @@ final class BillsStore: ObservableObject {
     @Published private(set) var recurringTransactions: [RecurringTransaction] = []
     @Published private(set) var iCloudSyncStatus: String = "未开启"
     @Published private(set) var iCloudLastSyncedAt: Date?
+    @Published private(set) var iCloudSyncLogs: [ICloudSyncLog] = []
 
     private let transactionsStore = JSONFileStore(filename: "transactions.json")
     private let categoriesStore = JSONFileStore(filename: "categories.json")
@@ -41,6 +42,17 @@ final class BillsStore: ObservableObject {
                 return "CSV 格式不正确，请使用应用导出的 CSV 文件"
             }
         }
+    }
+
+    struct ICloudSyncLog: Identifiable {
+        let id = UUID()
+        let date: Date
+        let message: String
+    }
+
+    private enum ICloudPullMode {
+        case replaceLocal
+        case mergeWithLocal
     }
 
     private var iCloudSyncEnabled = false
@@ -77,24 +89,96 @@ final class BillsStore: ObservableObject {
     }
 
     func setICloudSyncEnabled(_ enabled: Bool) {
-        iCloudSyncEnabled = enabled
-
         if enabled {
-            iCloudSyncStatus = "同步中"
-            startObservingICloudIfNeeded()
-            _ = NSUbiquitousKeyValueStore.default.synchronize()
+            addICloudLog("开始启用 iCloud 同步")
+            iCloudSyncStatus = "检测中"
 
-            let hasLocalData = hasUserGeneratedData()
-            let pulled = pullSnapshotFromICloud(force: !hasLocalData)
-            if !pulled {
-                pushSnapshotToICloud()
+            guard verifyICloudAvailability() else {
+                iCloudSyncEnabled = false
+                stopObservingICloud()
+                return
             }
-            iCloudSyncStatus = "已开启"
+
+            iCloudSyncEnabled = true
+            startObservingICloudIfNeeded()
+
+            let synchronizeAccepted = NSUbiquitousKeyValueStore.default.synchronize()
+            if !synchronizeAccepted {
+                iCloudSyncStatus = "同步不可用"
+                addICloudLog("系统未接受同步请求，请稍后重试")
+                return
+            }
+
+            iCloudSyncStatus = "同步中"
+            if hasRemoteSnapshot() {
+                _ = pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "首次开启")
+            } else {
+                _ = pushSnapshotToICloud(trigger: "首次开启")
+            }
         } else {
+            iCloudSyncEnabled = false
             stopObservingICloud()
             iCloudSyncStatus = "未开启"
+            addICloudLog("已关闭 iCloud 同步")
         }
     }
+
+    @discardableResult
+    func refreshICloudSyncStatusNow() -> String {
+        guard verifyICloudAvailability() else {
+            iCloudSyncEnabled = false
+            return "未检测到 iCloud 账号，请先在系统设置登录 iCloud"
+        }
+
+        iCloudSyncEnabled = true
+        startObservingICloudIfNeeded()
+
+        let synchronized = NSUbiquitousKeyValueStore.default.synchronize()
+        if synchronized {
+            iCloudSyncStatus = "已连接"
+            addICloudLog("状态检查：iCloud 连接正常")
+            return "iCloud 连接正常"
+        }
+
+        iCloudSyncStatus = "同步不可用"
+        addICloudLog("状态检查：系统未接受同步请求")
+        return "同步服务暂时不可用，请稍后重试"
+    }
+
+    @discardableResult
+    func pullFromICloudNow() -> String {
+        guard verifyICloudAvailability() else {
+            iCloudSyncEnabled = false
+            return "未检测到 iCloud 账号，请先在系统设置登录 iCloud"
+        }
+
+        iCloudSyncEnabled = true
+        startObservingICloudIfNeeded()
+
+        iCloudSyncStatus = "同步中"
+        let success = pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "手动拉取")
+        return success ? "拉取成功，已自动合并本地与云端数据" : "拉取失败，请查看同步日志"
+    }
+
+    @discardableResult
+    func pushToICloudNow() -> String {
+        guard verifyICloudAvailability() else {
+            iCloudSyncEnabled = false
+            return "未检测到 iCloud 账号，请先在系统设置登录 iCloud"
+        }
+
+        iCloudSyncEnabled = true
+        startObservingICloudIfNeeded()
+
+        iCloudSyncStatus = "同步中"
+        let success = pushSnapshotToICloud(trigger: "手动推送")
+        return success ? "推送成功，云端数据已更新" : "推送失败，请查看同步日志"
+    }
+
+    func clearICloudSyncLogs() {
+        iCloudSyncLogs.removeAll()
+    }
+
 
     func addTransaction(
         type: TransactionType,
@@ -944,48 +1028,76 @@ final class BillsStore: ObservableObject {
     private func pushSnapshotToICloudIfNeeded() {
         guard iCloudSyncEnabled else { return }
         guard !isApplyingICloudSnapshot else { return }
-        pushSnapshotToICloud()
+        _ = pushSnapshotToICloud(trigger: "自动推送")
     }
 
-    private func pushSnapshotToICloud() {
-        guard iCloudSyncEnabled else { return }
+    @discardableResult
+    private func pushSnapshotToICloud(trigger: String, snapshot: ICloudSnapshot? = nil) -> Bool {
+        guard iCloudSyncEnabled else { return false }
+        guard verifyICloudAvailability() else {
+            iCloudSyncEnabled = false
+            return false
+        }
 
-        let snapshot = ICloudSnapshot(
-            syncedAt: Date(),
-            transactions: transactions,
-            categories: categories,
-            accounts: accounts,
-            budgets: budgets,
-            transfers: transfers,
-            recurringTransactions: recurringTransactions
-        )
+        let snapshot = snapshot ?? localSnapshot(syncedAt: Date())
 
         do {
             let data = try JSONEncoder.appEncoder.encode(snapshot)
             let store = NSUbiquitousKeyValueStore.default
             store.set(data, forKey: ICloudKeys.snapshot)
-            store.synchronize()
-            iCloudLastSyncedAt = Date()
-            iCloudSyncStatus = "已开启"
+
+            let synchronized = store.synchronize()
+            if synchronized {
+                iCloudLastSyncedAt = Date()
+                iCloudSyncStatus = "已开启"
+                addICloudLog("\(trigger)：推送成功")
+                return true
+            }
+
+            iCloudSyncStatus = "同步不可用"
+            addICloudLog("\(trigger)：推送请求未被系统接受")
+            return false
         } catch {
             iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：推送失败（\(error.localizedDescription)）")
+            return false
         }
     }
 
     @discardableResult
-    private func pullSnapshotFromICloud(force: Bool) -> Bool {
+    private func pullSnapshotFromICloud(mode: ICloudPullMode, trigger: String) -> Bool {
+        guard iCloudSyncEnabled else { return false }
+        guard verifyICloudAvailability() else {
+            iCloudSyncEnabled = false
+            return false
+        }
+
         let store = NSUbiquitousKeyValueStore.default
-        guard let data = store.data(forKey: ICloudKeys.snapshot) else { return false }
+        guard let data = store.data(forKey: ICloudKeys.snapshot) else {
+            iCloudSyncStatus = "云端暂无数据"
+            addICloudLog("\(trigger)：云端暂无数据")
+            return false
+        }
 
         do {
-            let snapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: data)
-            if !force, hasUserGeneratedData() {
-                return false
+            let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: data)
+
+            switch mode {
+            case .replaceLocal:
+                applyICloudSnapshot(remoteSnapshot)
+                addICloudLog("\(trigger)：已拉取云端快照")
+            case .mergeWithLocal:
+                let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
+                applyICloudSnapshot(merged)
+                addICloudLog("\(trigger)：已合并本地与云端")
+                _ = pushSnapshotToICloud(trigger: "\(trigger)后回写", snapshot: merged)
             }
-            applyICloudSnapshot(snapshot)
+
+            iCloudSyncStatus = "已开启"
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：拉取失败（\(error.localizedDescription)）")
             return false
         }
     }
@@ -1021,11 +1133,32 @@ final class BillsStore: ObservableObject {
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: NSUbiquitousKeyValueStore.default,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             guard let self else { return }
             Task { @MainActor in
-                _ = self.pullSnapshotFromICloud(force: true)
+                self.handleICloudStoreChange(notification)
             }
+        }
+    }
+
+    private func handleICloudStoreChange(_ notification: Notification) {
+        let reasonRaw = (notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? NSNumber)?.intValue ?? -1
+
+        switch reasonRaw {
+        case NSUbiquitousKeyValueStoreServerChange:
+            addICloudLog("检测到云端数据变更")
+            _ = pullSnapshotFromICloud(mode: .replaceLocal, trigger: "云端变更")
+        case NSUbiquitousKeyValueStoreInitialSyncChange:
+            addICloudLog("检测到 iCloud 初始同步")
+            _ = pullSnapshotFromICloud(mode: .replaceLocal, trigger: "初始同步")
+        case NSUbiquitousKeyValueStoreQuotaViolationChange:
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("同步失败：iCloud 配额不足")
+        case NSUbiquitousKeyValueStoreAccountChange:
+            iCloudSyncStatus = "账号已变更"
+            addICloudLog("检测到 iCloud 账号变更，请重新检查同步")
+        default:
+            addICloudLog("收到未知 iCloud 通知（\(reasonRaw)）")
         }
     }
 
@@ -1035,6 +1168,106 @@ final class BillsStore: ObservableObject {
         }
         iCloudObserver = nil
     }
+
+    private func hasRemoteSnapshot() -> Bool {
+        NSUbiquitousKeyValueStore.default.data(forKey: ICloudKeys.snapshot) != nil
+    }
+
+    private func verifyICloudAvailability() -> Bool {
+        guard FileManager.default.ubiquityIdentityToken != nil else {
+            iCloudSyncStatus = "未登录 iCloud"
+            addICloudLog("未检测到 iCloud 账号，请在系统设置中登录后重试")
+            return false
+        }
+        return true
+    }
+
+    private func localSnapshot(syncedAt: Date) -> ICloudSnapshot {
+        ICloudSnapshot(
+            syncedAt: syncedAt,
+            transactions: transactions,
+            categories: categories,
+            accounts: accounts,
+            budgets: budgets,
+            transfers: transfers,
+            recurringTransactions: recurringTransactions
+        )
+    }
+
+    private func mergeSnapshots(local: ICloudSnapshot, remote: ICloudSnapshot) -> ICloudSnapshot {
+        let mergedTransactions = mergeByLatestUpdate(local.transactions, remote.transactions, updatedAt: \.updatedAt)
+            .sorted(by: { $0.date > $1.date })
+
+        let mergedBudgets = mergeByLatestUpdate(local.budgets, remote.budgets, updatedAt: \.updatedAt)
+            .sorted(by: { $0.month > $1.month })
+
+        let mergedTransfers = mergeByLatestUpdate(local.transfers, remote.transfers, updatedAt: \.updatedAt)
+            .sorted(by: { $0.date > $1.date })
+
+        let mergedRecurring = mergeByLatestUpdate(local.recurringTransactions, remote.recurringTransactions, updatedAt: \.updatedAt)
+            .sorted(by: { $0.startDate > $1.startDate })
+
+        let mergedCategories = mergeByIdentifierPreservingLocalOrder(local.categories, remote.categories)
+        let mergedAccounts = mergeByIdentifierPreservingLocalOrder(local.accounts, remote.accounts)
+
+        return ICloudSnapshot(
+            syncedAt: max(local.syncedAt, remote.syncedAt),
+            transactions: mergedTransactions,
+            categories: mergedCategories,
+            accounts: mergedAccounts,
+            budgets: mergedBudgets,
+            transfers: mergedTransfers,
+            recurringTransactions: mergedRecurring
+        )
+    }
+
+    private func mergeByLatestUpdate<T: Identifiable>(
+        _ local: [T],
+        _ remote: [T],
+        updatedAt: (T) -> Date
+    ) -> [T] where T.ID: Hashable {
+        var merged: [T.ID: T] = [:]
+
+        for item in remote {
+            merged[item.id] = item
+        }
+
+        for item in local {
+            guard let existing = merged[item.id] else {
+                merged[item.id] = item
+                continue
+            }
+
+            if updatedAt(item) >= updatedAt(existing) {
+                merged[item.id] = item
+            }
+        }
+
+        return Array(merged.values)
+    }
+
+    private func mergeByIdentifierPreservingLocalOrder<T: Identifiable>(
+        _ local: [T],
+        _ remote: [T]
+    ) -> [T] where T.ID: Hashable {
+        var result: [T] = local
+        var known = Set(local.map(\.id))
+
+        for item in remote where !known.contains(item.id) {
+            result.append(item)
+            known.insert(item.id)
+        }
+
+        return result
+    }
+
+    private func addICloudLog(_ message: String) {
+        iCloudSyncLogs.insert(ICloudSyncLog(date: Date(), message: message), at: 0)
+        if iCloudSyncLogs.count > 120 {
+            iCloudSyncLogs.removeLast(iCloudSyncLogs.count - 120)
+        }
+    }
+
 
     private func moveItems<T>(_ array: inout [T], from source: IndexSet, to destination: Int) {
         let sourceIndexes = source.filter { array.indices.contains($0) }.sorted()
