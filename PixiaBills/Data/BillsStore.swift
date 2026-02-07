@@ -496,7 +496,11 @@ final class BillsStore: ObservableObject {
 
         iCloudSyncEnabled = true
         iCloudSyncStatus = "同步中"
-        let success = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "手动拉取")
+        let success = await pullSnapshotFromICloud(
+            mode: .mergeWithLocal,
+            trigger: "手动拉取",
+            requireIncremental: false
+        )
         return success ? "拉取成功，已按增量版本合并本地与云端数据" : "拉取失败，请查看同步日志"
     }
 
@@ -2156,7 +2160,7 @@ final class BillsStore: ObservableObject {
                 continue
             }
 
-            if updatedAt(item) >= updatedAt(existing) {
+            if updatedAt(item) > updatedAt(existing) {
                 merged[item.id] = item
             }
         }
