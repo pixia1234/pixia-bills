@@ -18,6 +18,7 @@ settings:
     INFOPLIST_KEY_UILaunchScreen_Generation: true
     INFOPLIST_KEY_UIRequiresFullScreen: NO
     INFOPLIST_KEY_NSFaceIDUsageDescription: 使用 Face ID / Touch ID 快速解锁你的账本
+    INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
     INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
     TARGETED_DEVICE_FAMILY: "1,2"
