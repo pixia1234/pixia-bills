@@ -20,7 +20,7 @@ final class BillsStore: ObservableObject {
     private let recurringTransactionsStore = JSONFileStore(filename: "recurring-transactions.json")
 
     private enum ICloudKeys {
-        static let snapshot = "pixia-bills.snapshot.v1"
+        static let snapshotFilename = "pixia-bills-sync.json"
     }
 
     private struct ICloudSnapshot: Codable {
@@ -57,7 +57,8 @@ final class BillsStore: ObservableObject {
 
     private var iCloudSyncEnabled = false
     private var isApplyingICloudSnapshot = false
-    private var iCloudObserver: NSObjectProtocol?
+    private var iCloudMetadataQuery: NSMetadataQuery?
+    private var iCloudMetadataObservers: [NSObjectProtocol] = []
 
     init() {
         load()
@@ -90,7 +91,7 @@ final class BillsStore: ObservableObject {
 
     func setICloudSyncEnabled(_ enabled: Bool) {
         if enabled {
-            addICloudLog("开始启用 iCloud 同步")
+            addICloudLog("开始启用 iCloud 云盘同步")
             iCloudSyncStatus = "检测中"
 
             guard verifyICloudAvailability() else {
@@ -101,13 +102,6 @@ final class BillsStore: ObservableObject {
 
             iCloudSyncEnabled = true
             startObservingICloudIfNeeded()
-
-            let synchronizeAccepted = NSUbiquitousKeyValueStore.default.synchronize()
-            if !synchronizeAccepted {
-                iCloudSyncStatus = "同步不可用"
-                addICloudLog("系统未接受同步请求，请稍后重试")
-                return
-            }
 
             iCloudSyncStatus = "同步中"
             if hasRemoteSnapshot() {
@@ -127,29 +121,28 @@ final class BillsStore: ObservableObject {
     func refreshICloudSyncStatusNow() -> String {
         guard verifyICloudAvailability() else {
             iCloudSyncEnabled = false
-            return "未检测到 iCloud 账号，请先在系统设置登录 iCloud"
+            return "未检测到 iCloud 云盘可用环境，请先登录 iCloud 并开启 iCloud Drive"
         }
 
         iCloudSyncEnabled = true
         startObservingICloudIfNeeded()
 
-        let synchronized = NSUbiquitousKeyValueStore.default.synchronize()
-        if synchronized {
+        if hasRemoteSnapshot() {
             iCloudSyncStatus = "已连接"
-            addICloudLog("状态检查：iCloud 连接正常")
-            return "iCloud 连接正常"
+            addICloudLog("状态检查：iCloud 云盘连接正常，已检测到同步文件")
+            return "iCloud 云盘连接正常，已检测到同步文件"
         }
 
-        iCloudSyncStatus = "同步不可用"
-        addICloudLog("状态检查：系统未接受同步请求")
-        return "同步服务暂时不可用，请稍后重试"
+        iCloudSyncStatus = "已连接"
+        addICloudLog("状态检查：iCloud 云盘连接正常，但暂无同步文件")
+        return "iCloud 云盘连接正常，但云端暂无同步文件"
     }
 
     @discardableResult
     func pullFromICloudNow() -> String {
         guard verifyICloudAvailability() else {
             iCloudSyncEnabled = false
-            return "未检测到 iCloud 账号，请先在系统设置登录 iCloud"
+            return "未检测到 iCloud 云盘可用环境，请先登录 iCloud 并开启 iCloud Drive"
         }
 
         iCloudSyncEnabled = true
@@ -164,7 +157,7 @@ final class BillsStore: ObservableObject {
     func pushToICloudNow() -> String {
         guard verifyICloudAvailability() else {
             iCloudSyncEnabled = false
-            return "未检测到 iCloud 账号，请先在系统设置登录 iCloud"
+            return "未检测到 iCloud 云盘可用环境，请先登录 iCloud 并开启 iCloud Drive"
         }
 
         iCloudSyncEnabled = true
@@ -1039,27 +1032,42 @@ final class BillsStore: ObservableObject {
             return false
         }
 
+        guard let snapshotURL = resolveICloudSnapshotFileURL(createIfNeeded: true) else {
+            iCloudSyncStatus = "同步不可用"
+            addICloudLog("\(trigger)：无法定位 iCloud 云盘同步目录")
+            return false
+        }
+
         let snapshot = snapshot ?? localSnapshot(syncedAt: Date())
 
         do {
             let data = try JSONEncoder.appEncoder.encode(snapshot)
-            let store = NSUbiquitousKeyValueStore.default
-            store.set(data, forKey: ICloudKeys.snapshot)
 
-            let synchronized = store.synchronize()
-            if synchronized {
-                iCloudLastSyncedAt = Date()
-                iCloudSyncStatus = "已开启"
-                addICloudLog("\(trigger)：推送成功")
-                return true
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var coordinationError: NSError?
+            var writeError: Error?
+            coordinator.coordinate(writingItemAt: snapshotURL, options: .forReplacing, error: &coordinationError) { url in
+                do {
+                    try data.write(to: url, options: .atomic)
+                } catch {
+                    writeError = error
+                }
             }
 
-            iCloudSyncStatus = "同步不可用"
-            addICloudLog("\(trigger)：推送请求未被系统接受")
-            return false
+            if let coordinationError {
+                throw coordinationError
+            }
+            if let writeError {
+                throw writeError
+            }
+
+            iCloudLastSyncedAt = snapshot.syncedAt
+            iCloudSyncStatus = "已开启"
+            addICloudLog("\(trigger)：已写入 iCloud 云盘文件")
+            return true
         } catch {
             iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：推送失败（\(error.localizedDescription)）")
+            addICloudLog("\(trigger)：写入失败（\(error.localizedDescription)）")
             return false
         }
     }
@@ -1072,15 +1080,41 @@ final class BillsStore: ObservableObject {
             return false
         }
 
-        let store = NSUbiquitousKeyValueStore.default
-        guard let data = store.data(forKey: ICloudKeys.snapshot) else {
+        guard let snapshotURL = resolveICloudSnapshotFileURL(createIfNeeded: false, logFailures: false) else {
             iCloudSyncStatus = "云端暂无数据"
-            addICloudLog("\(trigger)：云端暂无数据")
+            addICloudLog("\(trigger)：云端暂无同步文件")
             return false
         }
 
         do {
-            let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: data)
+            try ensureICloudFileDownloadedIfNeeded(snapshotURL)
+
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var coordinationError: NSError?
+            var readError: Error?
+            var fileData: Data?
+
+            coordinator.coordinate(readingItemAt: snapshotURL, options: [], error: &coordinationError) { url in
+                do {
+                    fileData = try Data(contentsOf: url)
+                } catch {
+                    readError = error
+                }
+            }
+
+            if let coordinationError {
+                throw coordinationError
+            }
+            if let readError {
+                throw readError
+            }
+            guard let fileData, !fileData.isEmpty else {
+                iCloudSyncStatus = "云端暂无数据"
+                addICloudLog("\(trigger)：同步文件为空")
+                return false
+            }
+
+            let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: fileData)
 
             switch mode {
             case .replaceLocal:
@@ -1097,7 +1131,7 @@ final class BillsStore: ObservableObject {
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：拉取失败（\(error.localizedDescription)）")
+            addICloudLog("\(trigger)：读取失败（\(error.localizedDescription)）")
             return false
         }
     }
@@ -1127,50 +1161,65 @@ final class BillsStore: ObservableObject {
     }
 
     private func startObservingICloudIfNeeded() {
-        guard iCloudObserver == nil else { return }
+        guard iCloudMetadataQuery == nil else { return }
 
-        iCloudObserver = NotificationCenter.default.addObserver(
-            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-            object: NSUbiquitousKeyValueStore.default,
+        let query = NSMetadataQuery()
+        query.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
+        query.predicate = NSPredicate(format: "%K == %@", NSMetadataItemFSNameKey, ICloudKeys.snapshotFilename)
+
+        let center = NotificationCenter.default
+        let finishObserver = center.addObserver(
+            forName: .NSMetadataQueryDidFinishGathering,
+            object: query,
             queue: .main
-        ) { [weak self] notification in
+        ) { [weak self] _ in
             guard let self else { return }
-            Task { @MainActor in
-                self.handleICloudStoreChange(notification)
-            }
+            query.disableUpdates()
+            self.handleICloudMetadataUpdate(trigger: "初始索引")
+            query.enableUpdates()
         }
+
+        let updateObserver = center.addObserver(
+            forName: .NSMetadataQueryDidUpdate,
+            object: query,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            query.disableUpdates()
+            self.handleICloudMetadataUpdate(trigger: "云端文件变更")
+            query.enableUpdates()
+        }
+
+        iCloudMetadataObservers = [finishObserver, updateObserver]
+        iCloudMetadataQuery = query
+        query.start()
+
+        addICloudLog("已启动 iCloud 云盘文件监听")
     }
 
-    private func handleICloudStoreChange(_ notification: Notification) {
-        let reasonRaw = (notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? NSNumber)?.intValue ?? -1
-
-        switch reasonRaw {
-        case NSUbiquitousKeyValueStoreServerChange:
-            addICloudLog("检测到云端数据变更")
-            _ = pullSnapshotFromICloud(mode: .replaceLocal, trigger: "云端变更")
-        case NSUbiquitousKeyValueStoreInitialSyncChange:
-            addICloudLog("检测到 iCloud 初始同步")
-            _ = pullSnapshotFromICloud(mode: .replaceLocal, trigger: "初始同步")
-        case NSUbiquitousKeyValueStoreQuotaViolationChange:
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("同步失败：iCloud 配额不足")
-        case NSUbiquitousKeyValueStoreAccountChange:
-            iCloudSyncStatus = "账号已变更"
-            addICloudLog("检测到 iCloud 账号变更，请重新检查同步")
-        default:
-            addICloudLog("收到未知 iCloud 通知（\(reasonRaw)）")
-        }
+    private func handleICloudMetadataUpdate(trigger: String) {
+        guard iCloudSyncEnabled else { return }
+        _ = pullSnapshotFromICloud(mode: .replaceLocal, trigger: trigger)
     }
 
     private func stopObservingICloud() {
-        if let observer = iCloudObserver {
-            NotificationCenter.default.removeObserver(observer)
+        if let query = iCloudMetadataQuery {
+            query.stop()
         }
-        iCloudObserver = nil
+        iCloudMetadataQuery = nil
+
+        let center = NotificationCenter.default
+        for observer in iCloudMetadataObservers {
+            center.removeObserver(observer)
+        }
+        iCloudMetadataObservers.removeAll()
     }
 
     private func hasRemoteSnapshot() -> Bool {
-        NSUbiquitousKeyValueStore.default.data(forKey: ICloudKeys.snapshot) != nil
+        guard let snapshotURL = resolveICloudSnapshotFileURL(createIfNeeded: false, logFailures: false) else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: snapshotURL.path)
     }
 
     private func verifyICloudAvailability() -> Bool {
@@ -1179,7 +1228,56 @@ final class BillsStore: ObservableObject {
             addICloudLog("未检测到 iCloud 账号，请在系统设置中登录后重试")
             return false
         }
+
+        guard resolveICloudDocumentsURL(createIfNeeded: true, logFailures: true) != nil else {
+            iCloudSyncStatus = "云盘不可用"
+            addICloudLog("无法访问 iCloud 云盘容器，请检查 iCloud Drive 是否开启")
+            return false
+        }
+
         return true
+    }
+
+    private func resolveICloudSnapshotFileURL(createIfNeeded: Bool, logFailures: Bool = true) -> URL? {
+        guard let documentsURL = resolveICloudDocumentsURL(createIfNeeded: createIfNeeded, logFailures: logFailures) else {
+            return nil
+        }
+        return documentsURL.appendingPathComponent(ICloudKeys.snapshotFilename)
+    }
+
+    private func resolveICloudDocumentsURL(createIfNeeded: Bool, logFailures: Bool) -> URL? {
+        let fileManager = FileManager.default
+        guard let containerURL = fileManager.url(forUbiquityContainerIdentifier: nil) else {
+            if logFailures {
+                addICloudLog("未获取到 iCloud 云盘容器 URL")
+            }
+            return nil
+        }
+
+        let documentsURL = containerURL.appendingPathComponent("Documents", isDirectory: true)
+        if createIfNeeded, !fileManager.fileExists(atPath: documentsURL.path) {
+            do {
+                try fileManager.createDirectory(at: documentsURL, withIntermediateDirectories: true)
+            } catch {
+                if logFailures {
+                    addICloudLog("创建 iCloud 云盘目录失败（\(error.localizedDescription)）")
+                }
+                return nil
+            }
+        }
+
+        return documentsURL
+    }
+
+    private func ensureICloudFileDownloadedIfNeeded(_ url: URL) throws {
+        let fileManager = FileManager.default
+        guard fileManager.isUbiquitousItem(at: url) else { return }
+
+        let values = try url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
+        if values.ubiquitousItemDownloadingStatus == .notDownloaded {
+            try fileManager.startDownloadingUbiquitousItem(at: url)
+            addICloudLog("正在从 iCloud 云盘下载最新同步文件")
+        }
     }
 
     private func localSnapshot(syncedAt: Date) -> ICloudSnapshot {

@@ -56,7 +56,7 @@ struct SettingsView: View {
                 }
 
                 Section(header: Text("同步与安全")) {
-                    Toggle("iCloud 同步", isOn: Binding(
+                    Toggle("iCloud 云盘同步", isOn: Binding(
                         get: { settings.iCloudSyncEnabled },
                         set: { settings.iCloudSyncEnabled = $0 }
                     ))
