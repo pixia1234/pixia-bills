@@ -3,8 +3,7 @@ import SwiftUI
 struct AccountsView: View {
     @EnvironmentObject private var store: BillsStore
 
-    @State private var showingEditor = false
-    @State private var editingAccount: Account?
+    @State private var accountSheet: AccountSheet?
     @State private var showingTransferEditor = false
 
     var body: some View {
@@ -17,8 +16,7 @@ struct AccountsView: View {
                 } else {
                     ForEach(balances) { item in
                         Button {
-                            editingAccount = item.account
-                            showingEditor = true
+                            accountSheet = .edit(item.account)
                         } label: {
                             AccountBalanceRow(item: item)
                         }
@@ -60,20 +58,42 @@ struct AccountsView: View {
                 }
 
                 Button {
-                    editingAccount = nil
-                    showingEditor = true
+                    accountSheet = .create
                 } label: {
                     Image(systemName: "plus")
                 }
             }
         }
-        .sheet(isPresented: $showingEditor) {
-            AccountEditorSheet(account: editingAccount)
+        .sheet(item: $accountSheet) { destination in
+            AccountEditorSheet(account: destination.account)
                 .environmentObject(store)
         }
         .sheet(isPresented: $showingTransferEditor) {
             TransferEditorSheet()
                 .environmentObject(store)
+        }
+    }
+}
+
+private enum AccountSheet: Identifiable {
+    case create
+    case edit(Account)
+
+    var id: String {
+        switch self {
+        case .create:
+            return "create"
+        case .edit(let account):
+            return account.id.uuidString
+        }
+    }
+
+    var account: Account? {
+        switch self {
+        case .create:
+            return nil
+        case .edit(let account):
+            return account
         }
     }
 }
