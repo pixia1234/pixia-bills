@@ -139,6 +139,12 @@ private struct BudgetEditorSheet: View {
                 Section(header: Text("预算金额")) {
                     TextField("0", text: $limitText)
                         .keyboardType(.decimalPad)
+                        .onChange(of: limitText) { value in
+                            let sanitized = value.decimalInputSanitized
+                            if sanitized != value {
+                                limitText = sanitized
+                            }
+                        }
                 }
             }
             .navigationTitle("新增预算")

@@ -144,6 +144,12 @@ private struct RecurringEditorSheet: View {
                 Section(header: Text("金额与周期")) {
                     TextField("金额", text: $amountText)
                         .keyboardType(.decimalPad)
+                        .onChange(of: amountText) { value in
+                            let sanitized = value.decimalInputSanitized
+                            if sanitized != value {
+                                amountText = sanitized
+                            }
+                        }
 
                     Picker("频率", selection: $frequency) {
                         ForEach(RecurringTransaction.Frequency.allCases, id: \.self) { value in

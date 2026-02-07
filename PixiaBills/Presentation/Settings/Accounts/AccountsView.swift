@@ -179,6 +179,12 @@ private struct AccountEditorSheet: View {
                 Section(header: Text("初始余额")) {
                     TextField("0", text: $initialBalanceText)
                         .keyboardType(.decimalPad)
+                        .onChange(of: initialBalanceText) { value in
+                            let sanitized = value.decimalInputSanitized
+                            if sanitized != value {
+                                initialBalanceText = sanitized
+                            }
+                        }
                 }
             }
             .navigationTitle(account == nil ? "新增账户" : "编辑账户")
@@ -255,6 +261,12 @@ private struct TransferEditorSheet: View {
                 Section(header: Text("金额与时间")) {
                     TextField("金额", text: $amountText)
                         .keyboardType(.decimalPad)
+                        .onChange(of: amountText) { value in
+                            let sanitized = value.decimalInputSanitized
+                            if sanitized != value {
+                                amountText = sanitized
+                            }
+                        }
                     DatePicker("日期", selection: $date, displayedComponents: [.date])
                 }
 
