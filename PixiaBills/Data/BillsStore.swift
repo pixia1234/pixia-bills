@@ -19,8 +19,12 @@ final class BillsStore: ObservableObject {
     private let budgetsStore = JSONFileStore(filename: "budgets.json")
     private let transfersStore = JSONFileStore(filename: "transfers.json")
     private let recurringTransactionsStore = JSONFileStore(filename: "recurring-transactions.json")
+    private let deletedTransactionMarkersStore = JSONFileStore(filename: "deleted-transaction-markers.json")
     private let deletedCategoryMarkersStore = JSONFileStore(filename: "deleted-category-markers.json")
     private let deletedAccountMarkersStore = JSONFileStore(filename: "deleted-account-markers.json")
+    private let deletedBudgetMarkersStore = JSONFileStore(filename: "deleted-budget-markers.json")
+    private let deletedTransferMarkersStore = JSONFileStore(filename: "deleted-transfer-markers.json")
+    private let deletedRecurringMarkersStore = JSONFileStore(filename: "deleted-recurring-markers.json")
 
     private struct EntityDeletionMarker: Codable, Equatable {
         let id: UUID
@@ -35,8 +39,12 @@ final class BillsStore: ObservableObject {
         let budgets: [Budget]
         let transfers: [Transfer]
         let recurringTransactions: [RecurringTransaction]
+        let deletedTransactionMarkers: [EntityDeletionMarker]
         let deletedCategoryMarkers: [EntityDeletionMarker]
         let deletedAccountMarkers: [EntityDeletionMarker]
+        let deletedBudgetMarkers: [EntityDeletionMarker]
+        let deletedTransferMarkers: [EntityDeletionMarker]
+        let deletedRecurringMarkers: [EntityDeletionMarker]
 
         init(
             syncedAt: Date,
@@ -46,8 +54,12 @@ final class BillsStore: ObservableObject {
             budgets: [Budget],
             transfers: [Transfer],
             recurringTransactions: [RecurringTransaction],
+            deletedTransactionMarkers: [EntityDeletionMarker] = [],
             deletedCategoryMarkers: [EntityDeletionMarker] = [],
-            deletedAccountMarkers: [EntityDeletionMarker] = []
+            deletedAccountMarkers: [EntityDeletionMarker] = [],
+            deletedBudgetMarkers: [EntityDeletionMarker] = [],
+            deletedTransferMarkers: [EntityDeletionMarker] = [],
+            deletedRecurringMarkers: [EntityDeletionMarker] = []
         ) {
             self.syncedAt = syncedAt
             self.transactions = transactions
@@ -56,8 +68,12 @@ final class BillsStore: ObservableObject {
             self.budgets = budgets
             self.transfers = transfers
             self.recurringTransactions = recurringTransactions
+            self.deletedTransactionMarkers = deletedTransactionMarkers
             self.deletedCategoryMarkers = deletedCategoryMarkers
             self.deletedAccountMarkers = deletedAccountMarkers
+            self.deletedBudgetMarkers = deletedBudgetMarkers
+            self.deletedTransferMarkers = deletedTransferMarkers
+            self.deletedRecurringMarkers = deletedRecurringMarkers
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -68,8 +84,12 @@ final class BillsStore: ObservableObject {
             case budgets
             case transfers
             case recurringTransactions
+            case deletedTransactionMarkers
             case deletedCategoryMarkers
             case deletedAccountMarkers
+            case deletedBudgetMarkers
+            case deletedTransferMarkers
+            case deletedRecurringMarkers
         }
 
         init(from decoder: Decoder) throws {
@@ -81,8 +101,12 @@ final class BillsStore: ObservableObject {
             budgets = try container.decode([Budget].self, forKey: .budgets)
             transfers = try container.decode([Transfer].self, forKey: .transfers)
             recurringTransactions = try container.decode([RecurringTransaction].self, forKey: .recurringTransactions)
+            deletedTransactionMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedTransactionMarkers) ?? []
             deletedCategoryMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedCategoryMarkers) ?? []
             deletedAccountMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedAccountMarkers) ?? []
+            deletedBudgetMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedBudgetMarkers) ?? []
+            deletedTransferMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedTransferMarkers) ?? []
+            deletedRecurringMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedRecurringMarkers) ?? []
         }
     }
 
@@ -97,8 +121,12 @@ final class BillsStore: ObservableObject {
         let budgets: [Budget]
         let transfers: [Transfer]
         let recurringTransactions: [RecurringTransaction]
+        let deletedTransactionMarkers: [EntityDeletionMarker]
         let deletedCategoryMarkers: [EntityDeletionMarker]
         let deletedAccountMarkers: [EntityDeletionMarker]
+        let deletedBudgetMarkers: [EntityDeletionMarker]
+        let deletedTransferMarkers: [EntityDeletionMarker]
+        let deletedRecurringMarkers: [EntityDeletionMarker]
 
         init(
             version: Int,
@@ -111,8 +139,12 @@ final class BillsStore: ObservableObject {
             budgets: [Budget],
             transfers: [Transfer],
             recurringTransactions: [RecurringTransaction],
+            deletedTransactionMarkers: [EntityDeletionMarker] = [],
             deletedCategoryMarkers: [EntityDeletionMarker] = [],
-            deletedAccountMarkers: [EntityDeletionMarker] = []
+            deletedAccountMarkers: [EntityDeletionMarker] = [],
+            deletedBudgetMarkers: [EntityDeletionMarker] = [],
+            deletedTransferMarkers: [EntityDeletionMarker] = [],
+            deletedRecurringMarkers: [EntityDeletionMarker] = []
         ) {
             self.version = version
             self.syncedAt = syncedAt
@@ -124,8 +156,12 @@ final class BillsStore: ObservableObject {
             self.budgets = budgets
             self.transfers = transfers
             self.recurringTransactions = recurringTransactions
+            self.deletedTransactionMarkers = deletedTransactionMarkers
             self.deletedCategoryMarkers = deletedCategoryMarkers
             self.deletedAccountMarkers = deletedAccountMarkers
+            self.deletedBudgetMarkers = deletedBudgetMarkers
+            self.deletedTransferMarkers = deletedTransferMarkers
+            self.deletedRecurringMarkers = deletedRecurringMarkers
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -139,8 +175,12 @@ final class BillsStore: ObservableObject {
             case budgets
             case transfers
             case recurringTransactions
+            case deletedTransactionMarkers
             case deletedCategoryMarkers
             case deletedAccountMarkers
+            case deletedBudgetMarkers
+            case deletedTransferMarkers
+            case deletedRecurringMarkers
         }
 
         init(from decoder: Decoder) throws {
@@ -155,8 +195,12 @@ final class BillsStore: ObservableObject {
             budgets = try container.decode([Budget].self, forKey: .budgets)
             transfers = try container.decode([Transfer].self, forKey: .transfers)
             recurringTransactions = try container.decode([RecurringTransaction].self, forKey: .recurringTransactions)
+            deletedTransactionMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedTransactionMarkers) ?? []
             deletedCategoryMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedCategoryMarkers) ?? []
             deletedAccountMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedAccountMarkers) ?? []
+            deletedBudgetMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedBudgetMarkers) ?? []
+            deletedTransferMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedTransferMarkers) ?? []
+            deletedRecurringMarkers = try container.decodeIfPresent([EntityDeletionMarker].self, forKey: .deletedRecurringMarkers) ?? []
         }
     }
 
@@ -231,8 +275,12 @@ final class BillsStore: ObservableObject {
     private var webDAVAutoSyncDebounceNanoseconds: UInt64 = 900_000_000
     private var webDAVHasPendingLocalChanges = false
 
+    private var deletedTransactionMarkers: [EntityDeletionMarker] = []
     private var deletedCategoryMarkers: [EntityDeletionMarker] = []
     private var deletedAccountMarkers: [EntityDeletionMarker] = []
+    private var deletedBudgetMarkers: [EntityDeletionMarker] = []
+    private var deletedTransferMarkers: [EntityDeletionMarker] = []
+    private var deletedRecurringMarkers: [EntityDeletionMarker] = []
 
     private let webDAVSyncProgressDefaults = UserDefaults.standard
     private let webDAVSyncProgressStorageKey = "sync.webdav.last_processed_manifest_versions"
@@ -252,8 +300,20 @@ final class BillsStore: ObservableObject {
         budgets = budgetsStore.load([Budget].self, default: [])
         transfers = transfersStore.load([Transfer].self, default: [])
         recurringTransactions = recurringTransactionsStore.load([RecurringTransaction].self, default: [])
+        deletedTransactionMarkers = deletedTransactionMarkersStore.load([EntityDeletionMarker].self, default: [])
         deletedCategoryMarkers = deletedCategoryMarkersStore.load([EntityDeletionMarker].self, default: [])
         deletedAccountMarkers = deletedAccountMarkersStore.load([EntityDeletionMarker].self, default: [])
+        deletedBudgetMarkers = deletedBudgetMarkersStore.load([EntityDeletionMarker].self, default: [])
+        deletedTransferMarkers = deletedTransferMarkersStore.load([EntityDeletionMarker].self, default: [])
+        deletedRecurringMarkers = deletedRecurringMarkersStore.load([EntityDeletionMarker].self, default: [])
+
+        let transactionResolution = resolveEntitiesAgainstDeletionMarkers(
+            transactions,
+            markers: deletedTransactionMarkers,
+            updatedAt: \.updatedAt
+        )
+        transactions = transactionResolution.entities
+        deletedTransactionMarkers = transactionResolution.markers
 
         let categoryResolution = resolveEntitiesAgainstDeletionMarkers(
             categories,
@@ -270,6 +330,30 @@ final class BillsStore: ObservableObject {
         )
         accounts = accountResolution.entities
         deletedAccountMarkers = accountResolution.markers
+
+        let budgetResolution = resolveEntitiesAgainstDeletionMarkers(
+            budgets,
+            markers: deletedBudgetMarkers,
+            updatedAt: \.updatedAt
+        )
+        budgets = budgetResolution.entities
+        deletedBudgetMarkers = budgetResolution.markers
+
+        let transferResolution = resolveEntitiesAgainstDeletionMarkers(
+            transfers,
+            markers: deletedTransferMarkers,
+            updatedAt: \.updatedAt
+        )
+        transfers = transferResolution.entities
+        deletedTransferMarkers = transferResolution.markers
+
+        let recurringResolution = resolveEntitiesAgainstDeletionMarkers(
+            recurringTransactions,
+            markers: deletedRecurringMarkers,
+            updatedAt: \.updatedAt
+        )
+        recurringTransactions = recurringResolution.entities
+        deletedRecurringMarkers = recurringResolution.markers
 
         if categories.isEmpty {
             let fallback = resolveEntitiesAgainstDeletionMarkers(
@@ -529,7 +613,9 @@ final class BillsStore: ObservableObject {
             updatedAt: now
         )
         transactions.insert(transaction, at: 0)
+        removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
         persistTransactions()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     @discardableResult
@@ -565,6 +651,7 @@ final class BillsStore: ObservableObject {
                 updatedAt: now
             )
             transactions.insert(transaction, at: 0)
+            removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
             imported += 1
         }
 
@@ -576,6 +663,7 @@ final class BillsStore: ObservableObject {
         }
         if imported > 0 {
             persistTransactions()
+            persistDeletionMarkers(scheduleSync: false)
         }
 
         return imported
@@ -690,14 +778,22 @@ final class BillsStore: ObservableObject {
             updatedAt: now
         )
         transfers.insert(transfer, at: 0)
+        removeDeletionMarkers(matching: [transfer.id], from: &deletedTransferMarkers)
         persistTransfers()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     func deleteTransfers(ids: [UUID]) {
         guard !ids.isEmpty else { return }
         let idSet = Set(ids)
+        let now = Date()
         transfers.removeAll(where: { idSet.contains($0.id) })
+        deletedTransferMarkers = mergeDeletionMarkers(
+            deletedTransferMarkers,
+            ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
+        )
         persistTransfers()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     func transfers(inMonth month: Date) -> [Transfer] {
@@ -715,26 +811,31 @@ final class BillsStore: ObservableObject {
         }) {
             budgets[index].limit = limit
             budgets[index].updatedAt = Date()
+            removeDeletionMarkers(matching: [budgets[index].id], from: &deletedBudgetMarkers)
         } else {
             let now = Date()
-            budgets.append(
-                Budget(
-                    id: UUID(),
-                    month: start,
-                    type: type,
-                    categoryId: categoryId,
-                    limit: limit,
-                    createdAt: now,
-                    updatedAt: now
-                )
+            let budget = Budget(
+                id: UUID(),
+                month: start,
+                type: type,
+                categoryId: categoryId,
+                limit: limit,
+                createdAt: now,
+                updatedAt: now
             )
+            budgets.append(budget)
+            removeDeletionMarkers(matching: [budget.id], from: &deletedBudgetMarkers)
         }
         persistBudgets()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     func deleteBudget(_ budget: Budget) {
         budgets.removeAll(where: { $0.id == budget.id })
+        let marker = EntityDeletionMarker(id: budget.id, deletedAt: Date())
+        deletedBudgetMarkers = mergeDeletionMarkers(deletedBudgetMarkers, [marker])
         persistBudgets()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     func budgetUsages(inMonth month: Date, type: TransactionType) -> [BudgetUsage] {
@@ -790,7 +891,9 @@ final class BillsStore: ObservableObject {
             updatedAt: now
         )
         recurringTransactions.append(recurring)
+        removeDeletionMarkers(matching: [recurring.id], from: &deletedRecurringMarkers)
         persistRecurringTransactions()
+        persistDeletionMarkers(scheduleSync: false)
         applyRecurringTransactionsIfNeeded()
     }
 
@@ -798,7 +901,9 @@ final class BillsStore: ObservableObject {
         guard let index = recurringTransactions.firstIndex(where: { $0.id == recurring.id }) else { return }
         recurringTransactions[index].isEnabled = isEnabled
         recurringTransactions[index].updatedAt = Date()
+        removeDeletionMarkers(matching: [recurring.id], from: &deletedRecurringMarkers)
         persistRecurringTransactions()
+        persistDeletionMarkers(scheduleSync: false)
 
         if isEnabled {
             applyRecurringTransactionsIfNeeded()
@@ -808,8 +913,14 @@ final class BillsStore: ObservableObject {
     func deleteRecurringTransactions(ids: [UUID]) {
         guard !ids.isEmpty else { return }
         let idSet = Set(ids)
+        let now = Date()
         recurringTransactions.removeAll(where: { idSet.contains($0.id) })
+        deletedRecurringMarkers = mergeDeletionMarkers(
+            deletedRecurringMarkers,
+            ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
+        )
         persistRecurringTransactions()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     func deleteTransactions(at offsets: IndexSet) {
@@ -823,8 +934,14 @@ final class BillsStore: ObservableObject {
     func deleteTransactions(ids: [UUID]) {
         guard !ids.isEmpty else { return }
         let idSet = Set(ids)
+        let now = Date()
         transactions.removeAll(where: { idSet.contains($0.id) })
+        deletedTransactionMarkers = mergeDeletionMarkers(
+            deletedTransactionMarkers,
+            ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
+        )
         persistTransactions()
+        persistDeletionMarkers(scheduleSync: false)
     }
 
     func transactions(inMonth month: Date) -> [Transaction] {
@@ -1071,6 +1188,7 @@ final class BillsStore: ObservableObject {
                 updatedAt: now
             )
             transactions.insert(transaction, at: 0)
+            removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
             importedCount += 1
         }
 
@@ -1082,6 +1200,7 @@ final class BillsStore: ObservableObject {
         }
         if importedCount > 0 {
             persistTransactions()
+            persistDeletionMarkers(scheduleSync: false)
         }
 
         return importedCount
@@ -1304,7 +1423,16 @@ final class BillsStore: ObservableObject {
     }
 
     private func hasUserGeneratedData() -> Bool {
-        !transactions.isEmpty || !budgets.isEmpty || !transfers.isEmpty || !recurringTransactions.isEmpty
+        !transactions.isEmpty ||
+        !budgets.isEmpty ||
+        !transfers.isEmpty ||
+        !recurringTransactions.isEmpty ||
+        !deletedTransactionMarkers.isEmpty ||
+        !deletedCategoryMarkers.isEmpty ||
+        !deletedAccountMarkers.isEmpty ||
+        !deletedBudgetMarkers.isEmpty ||
+        !deletedTransferMarkers.isEmpty ||
+        !deletedRecurringMarkers.isEmpty
     }
 
     private func resolveCategory(name: String, type: TransactionType, didCreate: inout Bool) -> Category {
@@ -1496,8 +1624,12 @@ final class BillsStore: ObservableObject {
                 budgets: snapshot.budgets,
                 transfers: snapshot.transfers,
                 recurringTransactions: snapshot.recurringTransactions,
+                deletedTransactionMarkers: snapshot.deletedTransactionMarkers,
                 deletedCategoryMarkers: snapshot.deletedCategoryMarkers,
-                deletedAccountMarkers: snapshot.deletedAccountMarkers
+                deletedAccountMarkers: snapshot.deletedAccountMarkers,
+                deletedBudgetMarkers: snapshot.deletedBudgetMarkers,
+                deletedTransferMarkers: snapshot.deletedTransferMarkers,
+                deletedRecurringMarkers: snapshot.deletedRecurringMarkers
             )
 
             let encodedManifest = try JSONEncoder.appEncoder.encode(manifest)
@@ -1699,8 +1831,12 @@ final class BillsStore: ObservableObject {
             budgets: manifest.budgets,
             transfers: manifest.transfers,
             recurringTransactions: manifest.recurringTransactions,
+            deletedTransactionMarkers: manifest.deletedTransactionMarkers,
             deletedCategoryMarkers: manifest.deletedCategoryMarkers,
-            deletedAccountMarkers: manifest.deletedAccountMarkers
+            deletedAccountMarkers: manifest.deletedAccountMarkers,
+            deletedBudgetMarkers: manifest.deletedBudgetMarkers,
+            deletedTransferMarkers: manifest.deletedTransferMarkers,
+            deletedRecurringMarkers: manifest.deletedRecurringMarkers
         )
     }
 
@@ -1804,6 +1940,30 @@ final class BillsStore: ObservableObject {
         let normalizedCategories = snapshot.categories.isEmpty ? DefaultData.categories : snapshot.categories
         let normalizedAccounts = snapshot.accounts.isEmpty ? DefaultData.accounts : snapshot.accounts
 
+        let transactionResolution = resolveEntitiesAgainstDeletionMarkers(
+            snapshot.transactions,
+            markers: snapshot.deletedTransactionMarkers,
+            updatedAt: \.updatedAt
+        )
+
+        let budgetResolution = resolveEntitiesAgainstDeletionMarkers(
+            snapshot.budgets,
+            markers: snapshot.deletedBudgetMarkers,
+            updatedAt: \.updatedAt
+        )
+
+        let transferResolution = resolveEntitiesAgainstDeletionMarkers(
+            snapshot.transfers,
+            markers: snapshot.deletedTransferMarkers,
+            updatedAt: \.updatedAt
+        )
+
+        let recurringResolution = resolveEntitiesAgainstDeletionMarkers(
+            snapshot.recurringTransactions,
+            markers: snapshot.deletedRecurringMarkers,
+            updatedAt: \.updatedAt
+        )
+
         let categoryResolution = resolveEntitiesAgainstDeletionMarkers(
             normalizedCategories,
             markers: snapshot.deletedCategoryMarkers,
@@ -1815,15 +1975,19 @@ final class BillsStore: ObservableObject {
             updatedAt: \.updatedAt
         )
 
-        transactions = snapshot.transactions
+        transactions = transactionResolution.entities
         categories = categoryResolution.entities
         accounts = accountResolution.entities
-        budgets = snapshot.budgets
-        transfers = snapshot.transfers
-        recurringTransactions = snapshot.recurringTransactions
+        budgets = budgetResolution.entities
+        transfers = transferResolution.entities
+        recurringTransactions = recurringResolution.entities
 
+        deletedTransactionMarkers = transactionResolution.markers
         deletedCategoryMarkers = categoryResolution.markers
         deletedAccountMarkers = accountResolution.markers
+        deletedBudgetMarkers = budgetResolution.markers
+        deletedTransferMarkers = transferResolution.markers
+        deletedRecurringMarkers = recurringResolution.markers
 
         ensureBuiltInAccounts()
 
@@ -1848,26 +2012,22 @@ final class BillsStore: ObservableObject {
             budgets: budgets,
             transfers: transfers,
             recurringTransactions: recurringTransactions,
+            deletedTransactionMarkers: deletedTransactionMarkers,
             deletedCategoryMarkers: deletedCategoryMarkers,
-            deletedAccountMarkers: deletedAccountMarkers
+            deletedAccountMarkers: deletedAccountMarkers,
+            deletedBudgetMarkers: deletedBudgetMarkers,
+            deletedTransferMarkers: deletedTransferMarkers,
+            deletedRecurringMarkers: deletedRecurringMarkers
         )
     }
 
     private func mergeSnapshots(local: ICloudSnapshot, remote: ICloudSnapshot) -> ICloudSnapshot {
-        let mergedTransactions = mergeByLatestUpdate(local.transactions, remote.transactions, updatedAt: \.updatedAt)
-            .sorted(by: { $0.date > $1.date })
-
-        let mergedBudgets = mergeByLatestUpdate(local.budgets, remote.budgets, updatedAt: \.updatedAt)
-            .sorted(by: { $0.month > $1.month })
-
-        let mergedTransfers = mergeByLatestUpdate(local.transfers, remote.transfers, updatedAt: \.updatedAt)
-            .sorted(by: { $0.date > $1.date })
-
-        let mergedRecurring = mergeByLatestUpdate(local.recurringTransactions, remote.recurringTransactions, updatedAt: \.updatedAt)
-            .sorted(by: { $0.startDate > $1.startDate })
-
         let mergedCategoryMarkers = mergeDeletionMarkers(local.deletedCategoryMarkers, remote.deletedCategoryMarkers)
         let mergedAccountMarkers = mergeDeletionMarkers(local.deletedAccountMarkers, remote.deletedAccountMarkers)
+        let mergedTransactionMarkers = mergeDeletionMarkers(local.deletedTransactionMarkers, remote.deletedTransactionMarkers)
+        let mergedBudgetMarkers = mergeDeletionMarkers(local.deletedBudgetMarkers, remote.deletedBudgetMarkers)
+        let mergedTransferMarkers = mergeDeletionMarkers(local.deletedTransferMarkers, remote.deletedTransferMarkers)
+        let mergedRecurringMarkers = mergeDeletionMarkers(local.deletedRecurringMarkers, remote.deletedRecurringMarkers)
 
         let mergedCategories = mergeCategories(
             local: local.categories,
@@ -1880,6 +2040,39 @@ final class BillsStore: ObservableObject {
             deletionMarkers: mergedAccountMarkers
         )
 
+        let transactionMarkerByID = Dictionary(uniqueKeysWithValues: mergedTransactionMarkers.map { ($0.id, $0.deletedAt) })
+        let budgetMarkerByID = Dictionary(uniqueKeysWithValues: mergedBudgetMarkers.map { ($0.id, $0.deletedAt) })
+        let transferMarkerByID = Dictionary(uniqueKeysWithValues: mergedTransferMarkers.map { ($0.id, $0.deletedAt) })
+        let recurringMarkerByID = Dictionary(uniqueKeysWithValues: mergedRecurringMarkers.map { ($0.id, $0.deletedAt) })
+
+        let mergedBudgets = mergeByLatestUpdate(local.budgets, remote.budgets, updatedAt: \.updatedAt)
+            .filter { budget in
+                guard let deletedAt = budgetMarkerByID[budget.id] else { return true }
+                return budget.updatedAt > deletedAt
+            }
+            .sorted(by: { $0.month > $1.month })
+
+        let mergedTransfers = mergeByLatestUpdate(local.transfers, remote.transfers, updatedAt: \.updatedAt)
+            .filter { transfer in
+                guard let deletedAt = transferMarkerByID[transfer.id] else { return true }
+                return transfer.updatedAt > deletedAt
+            }
+            .sorted(by: { $0.date > $1.date })
+
+        let mergedRecurring = mergeByLatestUpdate(local.recurringTransactions, remote.recurringTransactions, updatedAt: \.updatedAt)
+            .filter { item in
+                guard let deletedAt = recurringMarkerByID[item.id] else { return true }
+                return item.updatedAt > deletedAt
+            }
+            .sorted(by: { $0.startDate > $1.startDate })
+
+        let mergedTransactions = mergeByLatestUpdate(local.transactions, remote.transactions, updatedAt: \.updatedAt)
+            .filter { transaction in
+                guard let deletedAt = transactionMarkerByID[transaction.id] else { return true }
+                return transaction.updatedAt > deletedAt
+            }
+            .sorted(by: { $0.date > $1.date })
+
         return ICloudSnapshot(
             syncedAt: max(local.syncedAt, remote.syncedAt),
             transactions: mergedTransactions,
@@ -1888,8 +2081,12 @@ final class BillsStore: ObservableObject {
             budgets: mergedBudgets,
             transfers: mergedTransfers,
             recurringTransactions: mergedRecurring,
+            deletedTransactionMarkers: mergedTransactionMarkers,
             deletedCategoryMarkers: mergedCategoryMarkers,
-            deletedAccountMarkers: mergedAccountMarkers
+            deletedAccountMarkers: mergedAccountMarkers,
+            deletedBudgetMarkers: mergedBudgetMarkers,
+            deletedTransferMarkers: mergedTransferMarkers,
+            deletedRecurringMarkers: mergedRecurringMarkers
         )
     }
 
@@ -2000,8 +2197,12 @@ final class BillsStore: ObservableObject {
     }
 
     private func persistDeletionMarkers(scheduleSync: Bool = true) {
+        deletedTransactionMarkersStore.save(deletedTransactionMarkers)
         deletedCategoryMarkersStore.save(deletedCategoryMarkers)
         deletedAccountMarkersStore.save(deletedAccountMarkers)
+        deletedBudgetMarkersStore.save(deletedBudgetMarkers)
+        deletedTransferMarkersStore.save(deletedTransferMarkers)
+        deletedRecurringMarkersStore.save(deletedRecurringMarkers)
 
         if scheduleSync {
             scheduleWebDAVSyncIfNeeded()
