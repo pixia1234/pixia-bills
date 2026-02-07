@@ -1543,7 +1543,7 @@ final class BillsStore: ObservableObject {
                     mode: .mergeWithLocal,
                     trigger: "\(trigger)：增量拉取",
                     knownRefs: remoteRefs,
-                    requireIncremental: false
+                    requireIncremental: true
                 )
                 guard pulled else { return false }
             } else if let legacySnapshot = try await loadLegacySnapshotIfExists() {
@@ -1694,51 +1694,34 @@ final class BillsStore: ObservableObject {
                 return false
             }
 
+            guard let latest = refs.last else {
+                throw WebDAVSyncError.snapshotNotFound
+            }
+
             let lastVersion = lastProcessedSnapshotVersion()
-            let incrementalRefs = refs.filter { $0.version > lastVersion }
-            let targetRefs: [WebDAVSnapshotVersionRef]
-
-            if incrementalRefs.isEmpty {
-                if requireIncremental {
-                    iCloudSyncStatus = "已开启"
-                    addICloudLog("\(trigger)：没有新的增量版本")
-                    return true
-                }
-
-                guard let latest = refs.last else {
-                    throw WebDAVSyncError.snapshotNotFound
-                }
-                targetRefs = [latest]
-            } else {
-                targetRefs = incrementalRefs
+            if latest.version <= lastVersion, requireIncremental {
+                iCloudSyncStatus = "已开启"
+                addICloudLog("\(trigger)：没有新的增量版本")
+                return true
             }
 
-            var workingSnapshot: ICloudSnapshot? = mode == .replaceLocal ? nil : localSnapshot(syncedAt: Date())
-            var appliedVersion = lastVersion
-
-            for ref in targetRefs {
-                let remoteSnapshot = try await loadSnapshotVersion(ref)
-                switch mode {
-                case .replaceLocal:
-                    workingSnapshot = remoteSnapshot
-                case .mergeWithLocal:
-                    if let local = workingSnapshot {
-                        workingSnapshot = mergeSnapshots(local: local, remote: remoteSnapshot)
-                    } else {
-                        workingSnapshot = remoteSnapshot
-                    }
-                }
-                appliedVersion = ref.version
-            }
-
-            guard let finalSnapshot = workingSnapshot else {
-                throw WebDAVSyncError.invalidSnapshotFormat("无法生成可应用的快照")
+            let remoteSnapshot = try await loadSnapshotVersion(latest)
+            let finalSnapshot: ICloudSnapshot
+            switch mode {
+            case .replaceLocal:
+                finalSnapshot = remoteSnapshot
+            case .mergeWithLocal:
+                finalSnapshot = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
             }
 
             applyICloudSnapshot(finalSnapshot)
-            saveLastProcessedSnapshotVersion(appliedVersion)
+            saveLastProcessedSnapshotVersion(latest.version)
             iCloudSyncStatus = "已开启"
-            addICloudLog("\(trigger)：已应用增量快照至 v\(appliedVersion)")
+            if latest.version > lastVersion {
+                addICloudLog("\(trigger)：已应用增量快照至 v\(latest.version)")
+            } else {
+                addICloudLog("\(trigger)：已重新拉取 v\(latest.version)")
+            }
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
