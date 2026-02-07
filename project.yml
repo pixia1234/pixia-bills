@@ -11,9 +11,9 @@ settings:
     SWIFT_VERSION: "5.9"
     GENERATE_INFOPLIST_FILE: YES
     CURRENT_PROJECT_VERSION: 1
-    MARKETING_VERSION: 0.1.4
+    MARKETING_VERSION: 0.1.5
     INFOPLIST_KEY_CFBundleDisplayName: pixia-bills
-    INFOPLIST_KEY_CFBundleShortVersionString: 0.1.4
+    INFOPLIST_KEY_CFBundleShortVersionString: 0.1.5
     INFOPLIST_KEY_CFBundleVersion: 1
     INFOPLIST_KEY_UILaunchScreen_Generation: true
     INFOPLIST_KEY_UIRequiresFullScreen: NO
