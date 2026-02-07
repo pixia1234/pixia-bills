@@ -145,16 +145,30 @@ final class BillsStore: ObservableObject {
         }
 
         iCloudSyncEnabled = true
-        let hasRemote = await hasRemoteSnapshot()
-        if hasRemote {
-            iCloudSyncStatus = "已连接"
-            addICloudLog("状态检查：WebDAV 连接正常，已检测到云端文件")
-            return "WebDAV 连接正常，已检测到云端文件"
+        guard let baseURL = webDAVConfiguration.baseURL,
+              let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+            iCloudSyncStatus = "配置不完整"
+            addICloudLog("状态检查：WebDAV URL 无效")
+            return "WebDAV URL 无效，请检查地址与路径"
         }
 
-        iCloudSyncStatus = "已连接"
-        addICloudLog("状态检查：WebDAV 连接正常，但云端暂无文件")
-        return "WebDAV 连接正常，但云端暂无文件"
+        do {
+            try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
+            let data = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
+
+            iCloudSyncStatus = "已连接"
+            if data != nil {
+                addICloudLog("状态检查：WebDAV 连接正常，已检测到云端文件")
+                return "WebDAV 连接正常，已检测到云端文件"
+            }
+
+            addICloudLog("状态检查：WebDAV 连接正常，但云端暂无文件")
+            return "WebDAV 连接正常，但云端暂无文件"
+        } catch {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("状态检查：WebDAV 连接失败（\(error.localizedDescription)）")
+            return "WebDAV 连接失败：\(error.localizedDescription)"
+        }
     }
 
     @discardableResult
@@ -213,11 +227,16 @@ final class BillsStore: ObservableObject {
         }
 
         iCloudSyncStatus = "同步中"
-        let hasRemote = await hasRemoteSnapshot()
-        if hasRemote {
-            _ = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "首次开启")
-        } else {
-            _ = await pushSnapshotToICloud(trigger: "首次开启")
+        do {
+            let hasRemote = try await remoteSnapshotExists()
+            if hasRemote {
+                _ = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "首次开启")
+            } else {
+                _ = await pushSnapshotToICloud(trigger: "首次开启")
+            }
+        } catch {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("首次开启：WebDAV 连接失败（\(error.localizedDescription)）")
         }
     }
 
@@ -1180,19 +1199,17 @@ final class BillsStore: ObservableObject {
         iCloudSyncStatus = "已开启"
     }
 
-    private func hasRemoteSnapshot() async -> Bool {
-        guard let baseURL = webDAVConfiguration.baseURL else { return false }
-
-        do {
-            try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
-            guard let snapshotURL = webDAVConfiguration.snapshotFileURL else { return false }
-            let data = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
-            return data != nil
-        } catch {
-            addICloudLog("状态检查：WebDAV 连接失败（\(error.localizedDescription)）")
-            return false
+    private func remoteSnapshotExists() async throws -> Bool {
+        guard let baseURL = webDAVConfiguration.baseURL,
+              let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+            throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
         }
+
+        try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
+        let data = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
+        return data != nil
     }
+
 
     private func verifyWebDAVConfiguration(logFailures: Bool) -> Bool {
         if webDAVConfiguration.baseURL == nil {
