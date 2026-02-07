@@ -12,6 +12,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: ios-unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -49,6 +53,29 @@ jobs:
             version="$input_version"
           elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            latest_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+            if [[ -n "$latest_tag" ]]; then
+              base_version="${latest_tag#v}"
+            else
+              base_version="$(grep -E 'MARKETING_VERSION:' project.yml | head -n 1 | awk '{print $2}')"
+            fi
+
+            if [[ ! "$base_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "Cannot parse base version: $base_version"
+              exit 1
+            fi
+
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[3]}"
+            patch=$((patch + 1))
+            version="${major}.${minor}.${patch}"
+
+            while git rev-parse "v${version}" >/dev/null 2>&1; do
+              patch=$((patch + 1))
+              version="${major}.${minor}.${patch}"
+            done
           else
             version="$(grep -E 'MARKETING_VERSION:' project.yml | head -n 1 | awk '{print $2}')"
           fi
