@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject private var store: BillsStore
@@ -6,7 +7,8 @@ struct SettingsView: View {
     @EnvironmentObject private var lockManager: BiometricLockManager
 
     @State private var exportURL: IdentifiableURL?
-    @State private var exportErrorMessage: IdentifiableMessage?
+    @State private var alertMessage: IdentifiableMessage?
+    @State private var showingCSVImporter = false
 
     var body: some View {
         NavigationView {
@@ -40,10 +42,16 @@ struct SettingsView: View {
                         do {
                             exportURL = IdentifiableURL(url: try store.exportTransactionsCSV())
                         } catch {
-                            exportErrorMessage = IdentifiableMessage(message: error.localizedDescription)
+                            alertMessage = IdentifiableMessage(message: "导出失败：\(error.localizedDescription)")
                         }
                     } label: {
                         Label("导出 CSV", systemImage: "square.and.arrow.up")
+                    }
+
+                    Button {
+                        showingCSVImporter = true
+                    } label: {
+                        Label("导入 CSV", systemImage: "square.and.arrow.down")
                     }
                 }
 
@@ -113,14 +121,28 @@ struct SettingsView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
                 }
+
+                Section(header: Text("关于")) {
+                    NavigationLink {
+                        AboutView()
+                    } label: {
+                        Label("关于 pixia-bills", systemImage: "info.circle")
+                    }
+                }
             }
             .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
             .sheet(item: $exportURL) { url in
                 ShareSheet(activityItems: [url.url])
             }
-            .alert(item: $exportErrorMessage) { message in
-                Alert(title: Text("导出失败"), message: Text(message.message), dismissButton: .default(Text("知道了")))
+            .fileImporter(
+                isPresented: $showingCSVImporter,
+                allowedContentTypes: [.commaSeparatedText, .plainText]
+            ) { result in
+                handleCSVImport(result)
+            }
+            .alert(item: $alertMessage) { message in
+                Alert(title: Text("提示"), message: Text(message.message), dismissButton: .default(Text("知道了")))
             }
         }
     }
@@ -131,4 +153,33 @@ struct SettingsView: View {
         formatter.dateFormat = "MM-dd HH:mm:ss"
         return formatter
     }()
+
+    private func handleCSVImport(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            importCSV(from: url)
+        case .failure(let error):
+            alertMessage = IdentifiableMessage(message: "导入失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func importCSV(from url: URL) {
+        let isSecurityScoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if isSecurityScoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let importedCount = try store.importTransactionsCSV(from: url)
+            if importedCount > 0 {
+                alertMessage = IdentifiableMessage(message: "已成功导入 \(importedCount) 笔流水")
+            } else {
+                alertMessage = IdentifiableMessage(message: "没有可导入的新流水（可能已存在或格式无效）")
+            }
+        } catch {
+            alertMessage = IdentifiableMessage(message: "导入失败：\(error.localizedDescription)")
+        }
+    }
 }

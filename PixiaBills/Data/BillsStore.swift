@@ -32,6 +32,17 @@ final class BillsStore: ObservableObject {
         let recurringTransactions: [RecurringTransaction]
     }
 
+    private enum CSVImportError: LocalizedError {
+        case invalidFormat
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidFormat:
+                return "CSV 格式不正确，请使用应用导出的 CSV 文件"
+            }
+        }
+    }
+
     private var iCloudSyncEnabled = false
     private var isApplyingICloudSnapshot = false
     private var iCloudObserver: NSObjectProtocol?
@@ -39,7 +50,6 @@ final class BillsStore: ObservableObject {
     init() {
         load()
     }
-
 
     var defaultAccountId: UUID {
         accounts.first?.id ?? DefaultData.accounts[0].id
@@ -542,6 +552,95 @@ final class BillsStore: ObservableObject {
         return url
     }
 
+    @discardableResult
+    func importTransactionsCSV(from url: URL) throws -> Int {
+        let data = try Data(contentsOf: url)
+        let content = String(decoding: data, as: UTF8.self)
+        let rows = parseCSVRecords(content)
+
+        guard rows.count >= 2 else {
+            throw CSVImportError.invalidFormat
+        }
+
+        let headers = rows[0].map {
+            $0
+                .replacingOccurrences(of: "\u{FEFF}", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }
+
+        guard let idIndex = headers.firstIndex(of: "id"),
+              let typeIndex = headers.firstIndex(of: "type"),
+              let amountIndex = headers.firstIndex(of: "amount"),
+              let dateIndex = headers.firstIndex(of: "date"),
+              let categoryIndex = headers.firstIndex(of: "category"),
+              let accountIndex = headers.firstIndex(of: "account") else {
+            throw CSVImportError.invalidFormat
+        }
+
+        let noteIndex = headers.firstIndex(of: "note")
+
+        var importedCount = 0
+        var categoryChanged = false
+        var accountChanged = false
+        var knownIds = Set(transactions.map(\.id))
+
+        for row in rows.dropFirst() {
+            if row.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                continue
+            }
+
+            let typeRaw = csvField(row, at: typeIndex).lowercased()
+            guard let type = TransactionType(rawValue: typeRaw) else { continue }
+
+            guard let amount = DecimalParser.parse(csvField(row, at: amountIndex)), amount > 0 else {
+                continue
+            }
+
+            let categoryName = csvField(row, at: categoryIndex)
+            let accountName = csvField(row, at: accountIndex)
+            let note = noteIndex.map { csvField(row, at: $0) }.flatMap { $0.nilIfEmpty }
+            let date = parseCSVDate(text: csvField(row, at: dateIndex)) ?? Date()
+
+            let category = resolveCategory(name: categoryName, type: type, didCreate: &categoryChanged)
+            let account = resolveAccount(name: accountName, didCreate: &accountChanged)
+
+            let idText = csvField(row, at: idIndex)
+            let id = UUID(uuidString: idText) ?? UUID()
+            if knownIds.contains(id) {
+                continue
+            }
+            knownIds.insert(id)
+
+            let now = Date()
+            let transaction = Transaction(
+                id: id,
+                type: type,
+                amount: amount,
+                date: date,
+                categoryId: category.id,
+                accountId: account.id,
+                note: note,
+                createdAt: now,
+                updatedAt: now
+            )
+            transactions.insert(transaction, at: 0)
+            importedCount += 1
+        }
+
+        if categoryChanged {
+            persistCategories()
+        }
+        if accountChanged {
+            persistAccounts()
+        }
+        if importedCount > 0 {
+            persistTransactions()
+        }
+
+        return importedCount
+    }
+
     private func persistTransactions() {
         transactionsStore.save(transactions)
         pushSnapshotToICloudIfNeeded()
@@ -677,6 +776,81 @@ final class BillsStore: ObservableObject {
         return transactions.contains(where: {
             calendar.isDate($0.date, inSameDayAs: date) && ($0.note?.contains(marker) ?? false)
         })
+    }
+
+    private func csvField(_ row: [String], at index: Int) -> String {
+        guard row.indices.contains(index) else { return "" }
+        return row[index].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func parseCSVDate(text: String) -> Date? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let full = ISO8601DateFormatter()
+        full.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = full.date(from: trimmed) {
+            return date
+        }
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        if let date = standard.date(from: trimmed) {
+            return date
+        }
+
+        return nil
+    }
+
+    private func parseCSVRecords(_ content: String) -> [[String]] {
+        var records: [[String]] = []
+        var record: [String] = []
+        var field = ""
+        var inQuotes = false
+
+        let characters = Array(content)
+        var index = 0
+
+        while index < characters.count {
+            let char = characters[index]
+
+            if char == "\"" {
+                if inQuotes, index + 1 < characters.count, characters[index + 1] == "\"" {
+                    field.append("\"")
+                    index += 1
+                } else {
+                    inQuotes.toggle()
+                }
+            } else if char == ",", !inQuotes {
+                record.append(field)
+                field = ""
+            } else if (char == "\n" || char == "\r"), !inQuotes {
+                if char == "\r", index + 1 < characters.count, characters[index + 1] == "\n" {
+                    index += 1
+                }
+
+                record.append(field)
+                field = ""
+
+                if !record.allSatisfy({ $0.isEmpty }) {
+                    records.append(record)
+                }
+                record = []
+            } else {
+                field.append(char)
+            }
+
+            index += 1
+        }
+
+        if !field.isEmpty || !record.isEmpty {
+            record.append(field)
+            if !record.allSatisfy({ $0.isEmpty }) {
+                records.append(record)
+            }
+        }
+
+        return records
     }
 
     private func hasUserGeneratedData() -> Bool {
