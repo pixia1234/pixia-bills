@@ -56,7 +56,7 @@ struct WebDAVSyncSettingsView: View {
                 }
             }
 
-            Section(header: Text("手动同步"), footer: Text("开启 WebDAV 同步后，应用会在本地变更、配置更新和回到前台时自动拉取合并并回写。以下按钮用于手动排查与强制同步。")) {
+            Section(header: Text("手动同步"), footer: Text("开启同步后会增量拉取新版本，并在本地变更时推送新的分片快照版本（不覆盖历史文件）。以下按钮用于手动排查与强制同步。")) {
                 Button {
                     Task {
                         let text = await store.refreshICloudSyncStatusNow(configuration: settings.webDAVConfiguration)

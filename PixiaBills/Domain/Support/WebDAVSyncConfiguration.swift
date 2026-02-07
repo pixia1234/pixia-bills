@@ -82,12 +82,59 @@ struct WebDAVSyncConfiguration: Equatable {
         return components.url
     }
 
-    var snapshotFileName: String {
+    var legacySnapshotFileName: String {
         "pixia-bills-sync.enc"
     }
 
-    var snapshotFileURL: URL? {
-        baseURL?.appendingPathComponent(snapshotFileName)
+    var legacySnapshotFileURL: URL? {
+        fileURL(fileName: legacySnapshotFileName)
+    }
+
+    var snapshotManifestPrefix: String {
+        "pixia-bills-sync-v"
+    }
+
+    var snapshotManifestSuffix: String {
+        "-manifest.enc"
+    }
+
+    var transactionChunkSize: Int {
+        10_000
+    }
+
+    var endpointStateKey: String {
+        [
+            normalizedScheme,
+            normalizedHost,
+            String(normalizedPort ?? 0),
+            normalizedPath,
+            normalizedUsername
+        ].joined(separator: "|")
+    }
+
+    func manifestFileName(version: Int) -> String {
+        String(format: "%@%08d%@", snapshotManifestPrefix, version, snapshotManifestSuffix)
+    }
+
+    func transactionChunkFileName(version: Int, chunkIndex: Int) -> String {
+        String(format: "pixia-bills-sync-v%08d-part-%04d.enc", version, chunkIndex)
+    }
+
+    func parseVersion(fromManifestFileName fileName: String) -> Int? {
+        guard fileName.hasPrefix(snapshotManifestPrefix),
+              fileName.hasSuffix(snapshotManifestSuffix) else {
+            return nil
+        }
+
+        let begin = fileName.index(fileName.startIndex, offsetBy: snapshotManifestPrefix.count)
+        let end = fileName.index(fileName.endIndex, offsetBy: -snapshotManifestSuffix.count)
+        guard begin < end else { return nil }
+
+        return Int(fileName[begin..<end])
+    }
+
+    func fileURL(fileName: String) -> URL? {
+        baseURL?.appendingPathComponent(fileName)
     }
 
     var endpointDescription: String {

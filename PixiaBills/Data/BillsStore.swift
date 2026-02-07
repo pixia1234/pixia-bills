@@ -30,6 +30,30 @@ final class BillsStore: ObservableObject {
         let recurringTransactions: [RecurringTransaction]
     }
 
+    private struct WebDAVSnapshotManifest: Codable {
+        let version: Int
+        let syncedAt: Date
+        let transactionChunkSize: Int
+        let totalTransactions: Int
+        let transactionChunkFileNames: [String]
+        let categories: [Category]
+        let accounts: [Account]
+        let budgets: [Budget]
+        let transfers: [Transfer]
+        let recurringTransactions: [RecurringTransaction]
+    }
+
+    private struct WebDAVTransactionChunk: Codable {
+        let version: Int
+        let chunkIndex: Int
+        let transactions: [Transaction]
+    }
+
+    private struct WebDAVSnapshotVersionRef {
+        let version: Int
+        let manifestFileName: String
+    }
+
     private enum CSVImportError: LocalizedError {
         case invalidFormat
 
@@ -47,6 +71,8 @@ final class BillsStore: ObservableObject {
         case encryptionFailed
         case decryptionFailed
         case emptyRemotePayload
+        case snapshotNotFound
+        case invalidSnapshotFormat(String)
 
         var errorDescription: String? {
             switch self {
@@ -58,6 +84,10 @@ final class BillsStore: ObservableObject {
                 return "数据解密失败，请确认加密密钥是否一致"
             case .emptyRemotePayload:
                 return "云端文件为空"
+            case .snapshotNotFound:
+                return "云端不存在可用快照"
+            case .invalidSnapshotFormat(let message):
+                return message
             }
         }
     }
@@ -82,6 +112,10 @@ final class BillsStore: ObservableObject {
     private var webDAVAutoSyncToken = UUID()
     private var webDAVAutoSyncTrigger: String?
     private var webDAVAutoSyncDebounceNanoseconds: UInt64 = 900_000_000
+    private var webDAVHasPendingLocalChanges = false
+
+    private let webDAVSyncProgressDefaults = UserDefaults.standard
+    private let webDAVSyncProgressStorageKey = "sync.webdav.last_processed_manifest_versions"
 
     init() {
         load()
@@ -116,9 +150,17 @@ final class BillsStore: ObservableObject {
         webDAVConfiguration = configuration
     }
 
-    func requestAutoWebDAVSync(trigger: String = "自动同步", debounceNanoseconds: UInt64 = 900_000_000) {
+    func requestAutoWebDAVSync(
+        trigger: String = "自动同步",
+        debounceNanoseconds: UInt64 = 900_000_000,
+        markPendingLocalChanges: Bool = false
+    ) {
         guard iCloudSyncEnabled else { return }
         guard !isApplyingICloudSnapshot else { return }
+
+        if markPendingLocalChanges {
+            webDAVHasPendingLocalChanges = true
+        }
 
         webDAVAutoSyncTrigger = trigger
         webDAVAutoSyncDebounceNanoseconds = debounceNanoseconds
@@ -147,6 +189,7 @@ final class BillsStore: ObservableObject {
             }
         } else {
             iCloudSyncEnabled = false
+            webDAVHasPendingLocalChanges = false
             webDAVAutoSyncTrigger = nil
             webDAVAutoSyncTask?.cancel()
             webDAVAutoSyncTask = nil
@@ -168,8 +211,7 @@ final class BillsStore: ObservableObject {
         }
 
         iCloudSyncEnabled = true
-        guard let baseURL = webDAVConfiguration.baseURL,
-              let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+        guard let baseURL = webDAVConfiguration.baseURL else {
             iCloudSyncStatus = "配置不完整"
             addICloudLog("状态检查：WebDAV URL 无效")
             return "WebDAV URL 无效，请检查地址与路径"
@@ -177,16 +219,21 @@ final class BillsStore: ObservableObject {
 
         do {
             try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
-            let data = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
+            let refs = try await fetchRemoteSnapshotManifestRefs()
 
             iCloudSyncStatus = "已连接"
-            if data != nil {
-                addICloudLog("状态检查：WebDAV 连接正常，已检测到云端文件")
-                return "WebDAV 连接正常，已检测到云端文件"
+            if let latest = refs.last {
+                addICloudLog("状态检查：WebDAV 连接正常，检测到 \(refs.count) 个快照版本（最新 v\(latest.version)）")
+                return "WebDAV 连接正常，检测到 \(refs.count) 个快照版本（最新 v\(latest.version)）"
             }
 
-            addICloudLog("状态检查：WebDAV 连接正常，但云端暂无文件")
-            return "WebDAV 连接正常，但云端暂无文件"
+            if (try? await loadLegacySnapshotIfExists()) != nil {
+                addICloudLog("状态检查：仅检测到旧版单文件快照，首次同步会自动迁移")
+                return "WebDAV 连接正常，仅检测到旧版单文件快照，首次同步会自动迁移"
+            }
+
+            addICloudLog("状态检查：WebDAV 连接正常，但云端暂无版本快照")
+            return "WebDAV 连接正常，但云端暂无版本快照"
         } catch {
             iCloudSyncStatus = "同步失败"
             addICloudLog("状态检查：WebDAV 连接失败（\(error.localizedDescription)）")
@@ -210,7 +257,7 @@ final class BillsStore: ObservableObject {
         iCloudSyncEnabled = true
         iCloudSyncStatus = "同步中"
         let success = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "手动拉取")
-        return success ? "拉取成功，已自动合并本地与云端数据" : "拉取失败，请查看同步日志"
+        return success ? "拉取成功，已按增量版本合并本地与云端数据" : "拉取失败，请查看同步日志"
     }
 
     @discardableResult
@@ -229,6 +276,9 @@ final class BillsStore: ObservableObject {
         iCloudSyncEnabled = true
         iCloudSyncStatus = "同步中"
         let success = await pushSnapshotToICloud(trigger: "手动推送")
+        if success {
+            webDAVHasPendingLocalChanges = false
+        }
         return success ? "推送成功，云端数据已更新" : "推送失败，请查看同步日志"
     }
 
@@ -253,9 +303,12 @@ final class BillsStore: ObservableObject {
         do {
             let hasRemote = try await remoteSnapshotExists()
             if hasRemote {
-                _ = await pullSnapshotFromICloud(mode: .mergeWithLocal, trigger: "首次开启")
+                webDAVHasPendingLocalChanges = hasUserGeneratedData()
+                _ = await syncSnapshotWithWebDAV(trigger: "首次开启")
             } else {
+                webDAVHasPendingLocalChanges = true
                 _ = await pushSnapshotToICloud(trigger: "首次开启")
+                webDAVHasPendingLocalChanges = false
             }
         } catch {
             iCloudSyncStatus = "同步失败"
@@ -1150,7 +1203,7 @@ final class BillsStore: ObservableObject {
     }
 
     private func scheduleWebDAVSyncIfNeeded() {
-        requestAutoWebDAVSync(trigger: "本地变更")
+        requestAutoWebDAVSync(trigger: "本地变更", markPendingLocalChanges: true)
     }
 
     @discardableResult
@@ -1160,31 +1213,37 @@ final class BillsStore: ObservableObject {
             iCloudSyncStatus = "配置不完整"
             return false
         }
-        guard let snapshotURL = webDAVConfiguration.snapshotFileURL else {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
-            return false
-        }
 
         iCloudSyncStatus = "同步中"
 
         do {
-            let remoteData = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
-            if let remoteData {
-                guard !remoteData.isEmpty else {
-                    throw WebDAVSyncError.emptyRemotePayload
-                }
-
-                let decrypted = try decryptSnapshot(remoteData)
-                let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: decrypted)
-                let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
+            let remoteRefs = try await fetchRemoteSnapshotManifestRefs()
+            if !remoteRefs.isEmpty {
+                let pulled = await pullSnapshotFromICloud(
+                    mode: .mergeWithLocal,
+                    trigger: "\(trigger)：增量拉取",
+                    knownRefs: remoteRefs,
+                    requireIncremental: false
+                )
+                guard pulled else { return false }
+            } else if let legacySnapshot = try await loadLegacySnapshotIfExists() {
+                let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: legacySnapshot)
                 applyICloudSnapshot(merged)
-                addICloudLog("\(trigger)：已合并本地与云端")
-                return await pushSnapshotToICloud(trigger: "\(trigger)后回写", snapshot: merged)
+                addICloudLog("\(trigger)：已迁移旧版单文件快照")
+            }
+
+            guard webDAVHasPendingLocalChanges || remoteRefs.isEmpty else {
+                iCloudSyncStatus = "已开启"
+                addICloudLog("\(trigger)：无本地新增变更，已跳过推送")
+                return true
             }
 
             let snapshot = localSnapshot(syncedAt: Date())
-            return await pushSnapshotToICloud(trigger: "\(trigger)：云端无文件，已创建", snapshot: snapshot)
+            let pushed = await pushSnapshotToICloud(trigger: "\(trigger)：版本推送", snapshot: snapshot)
+            if pushed {
+                webDAVHasPendingLocalChanges = false
+            }
+            return pushed
         } catch {
             iCloudSyncStatus = "同步失败"
             addICloudLog("\(trigger)：WebDAV 同步失败（\(error.localizedDescription)）")
@@ -1199,7 +1258,7 @@ final class BillsStore: ObservableObject {
             iCloudSyncEnabled = false
             return false
         }
-        guard let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+        guard let baseURL = webDAVConfiguration.baseURL else {
             iCloudSyncStatus = "同步失败"
             addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
             return false
@@ -1208,13 +1267,59 @@ final class BillsStore: ObservableObject {
         let snapshot = snapshot ?? localSnapshot(syncedAt: Date())
 
         do {
-            let encoded = try JSONEncoder.appEncoder.encode(snapshot)
-            let encrypted = try encryptSnapshot(encoded)
-            try await webDAVClient.upload(data: encrypted, url: snapshotURL, configuration: webDAVConfiguration)
+            try await webDAVClient.ensureDirectoryExists(directoryURL: baseURL, configuration: webDAVConfiguration)
 
+            let remoteRefs = try await fetchRemoteSnapshotManifestRefs()
+            let nextVersion = (remoteRefs.last?.version ?? 0) + 1
+            let chunkSize = max(1, webDAVConfiguration.transactionChunkSize)
+            let transactionChunks = chunkedTransactions(snapshot.transactions, chunkSize: chunkSize)
+            let chunkFileNames = transactionChunks.indices.map {
+                webDAVConfiguration.transactionChunkFileName(version: nextVersion, chunkIndex: $0 + 1)
+            }
+
+            for (index, chunkTransactions) in transactionChunks.enumerated() {
+                let chunk = WebDAVTransactionChunk(
+                    version: nextVersion,
+                    chunkIndex: index + 1,
+                    transactions: chunkTransactions
+                )
+                let encodedChunk = try JSONEncoder.appEncoder.encode(chunk)
+                let encryptedChunk = try encryptSnapshot(encodedChunk)
+
+                guard let chunkURL = webDAVConfiguration.fileURL(fileName: chunkFileNames[index]) else {
+                    throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+                }
+
+                try await webDAVClient.upload(data: encryptedChunk, url: chunkURL, configuration: webDAVConfiguration)
+            }
+
+            let manifest = WebDAVSnapshotManifest(
+                version: nextVersion,
+                syncedAt: snapshot.syncedAt,
+                transactionChunkSize: chunkSize,
+                totalTransactions: snapshot.transactions.count,
+                transactionChunkFileNames: chunkFileNames,
+                categories: snapshot.categories,
+                accounts: snapshot.accounts,
+                budgets: snapshot.budgets,
+                transfers: snapshot.transfers,
+                recurringTransactions: snapshot.recurringTransactions
+            )
+
+            let encodedManifest = try JSONEncoder.appEncoder.encode(manifest)
+            let encryptedManifest = try encryptSnapshot(encodedManifest)
+            let manifestFileName = webDAVConfiguration.manifestFileName(version: nextVersion)
+
+            guard let manifestURL = webDAVConfiguration.fileURL(fileName: manifestFileName) else {
+                throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+            }
+
+            try await webDAVClient.upload(data: encryptedManifest, url: manifestURL, configuration: webDAVConfiguration)
+
+            saveLastProcessedSnapshotVersion(nextVersion)
             iCloudLastSyncedAt = snapshot.syncedAt
             iCloudSyncStatus = "已开启"
-            addICloudLog("\(trigger)：WebDAV 推送成功")
+            addICloudLog("\(trigger)：WebDAV 推送成功（v\(nextVersion)，分片 \(max(chunkFileNames.count, 1)) 个）")
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
@@ -1224,45 +1329,90 @@ final class BillsStore: ObservableObject {
     }
 
     @discardableResult
-    private func pullSnapshotFromICloud(mode: ICloudPullMode, trigger: String) async -> Bool {
+    private func pullSnapshotFromICloud(
+        mode: ICloudPullMode,
+        trigger: String,
+        knownRefs: [WebDAVSnapshotVersionRef]? = nil,
+        requireIncremental: Bool = true
+    ) async -> Bool {
         guard iCloudSyncEnabled else { return false }
         guard verifyWebDAVConfiguration(logFailures: true) else {
             iCloudSyncEnabled = false
             return false
         }
-        guard let snapshotURL = webDAVConfiguration.snapshotFileURL else {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
-            return false
-        }
 
         do {
-            let remoteData = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
-            guard let remoteData else {
+            let refs: [WebDAVSnapshotVersionRef]
+            if let knownRefs {
+                refs = knownRefs
+            } else {
+                refs = try await fetchRemoteSnapshotManifestRefs()
+            }
+
+            if refs.isEmpty {
+                if let legacySnapshot = try await loadLegacySnapshotIfExists() {
+                    switch mode {
+                    case .replaceLocal:
+                        applyICloudSnapshot(legacySnapshot)
+                    case .mergeWithLocal:
+                        let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: legacySnapshot)
+                        applyICloudSnapshot(merged)
+                    }
+                    iCloudSyncStatus = "已开启"
+                    addICloudLog("\(trigger)：已从旧版单文件快照拉取")
+                    return true
+                }
+
                 iCloudSyncStatus = "云端暂无数据"
-                addICloudLog("\(trigger)：云端暂无同步文件")
+                addICloudLog("\(trigger)：云端暂无同步快照")
                 return false
             }
 
-            guard !remoteData.isEmpty else {
-                throw WebDAVSyncError.emptyRemotePayload
+            let lastVersion = lastProcessedSnapshotVersion()
+            let incrementalRefs = refs.filter { $0.version > lastVersion }
+            let targetRefs: [WebDAVSnapshotVersionRef]
+
+            if incrementalRefs.isEmpty {
+                if requireIncremental {
+                    iCloudSyncStatus = "已开启"
+                    addICloudLog("\(trigger)：没有新的增量版本")
+                    return true
+                }
+
+                guard let latest = refs.last else {
+                    throw WebDAVSyncError.snapshotNotFound
+                }
+                targetRefs = [latest]
+            } else {
+                targetRefs = incrementalRefs
             }
 
-            let decrypted = try decryptSnapshot(remoteData)
-            let remoteSnapshot = try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: decrypted)
+            var workingSnapshot: ICloudSnapshot? = mode == .replaceLocal ? nil : localSnapshot(syncedAt: Date())
+            var appliedVersion = lastVersion
 
-            switch mode {
-            case .replaceLocal:
-                applyICloudSnapshot(remoteSnapshot)
-                addICloudLog("\(trigger)：已拉取云端快照")
-            case .mergeWithLocal:
-                let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
-                applyICloudSnapshot(merged)
-                addICloudLog("\(trigger)：已合并本地与云端")
-                _ = await pushSnapshotToICloud(trigger: "\(trigger)后回写", snapshot: merged)
+            for ref in targetRefs {
+                let remoteSnapshot = try await loadSnapshotVersion(ref)
+                switch mode {
+                case .replaceLocal:
+                    workingSnapshot = remoteSnapshot
+                case .mergeWithLocal:
+                    if let local = workingSnapshot {
+                        workingSnapshot = mergeSnapshots(local: local, remote: remoteSnapshot)
+                    } else {
+                        workingSnapshot = remoteSnapshot
+                    }
+                }
+                appliedVersion = ref.version
             }
 
+            guard let finalSnapshot = workingSnapshot else {
+                throw WebDAVSyncError.invalidSnapshotFormat("无法生成可应用的快照")
+            }
+
+            applyICloudSnapshot(finalSnapshot)
+            saveLastProcessedSnapshotVersion(appliedVersion)
             iCloudSyncStatus = "已开启"
+            addICloudLog("\(trigger)：已应用增量快照至 v\(appliedVersion)")
             return true
         } catch {
             iCloudSyncStatus = "同步失败"
@@ -1271,41 +1421,135 @@ final class BillsStore: ObservableObject {
         }
     }
 
-    private func applyICloudSnapshot(_ snapshot: ICloudSnapshot) {
-        isApplyingICloudSnapshot = true
-        defer { isApplyingICloudSnapshot = false }
+    private func chunkedTransactions(_ source: [Transaction], chunkSize: Int) -> [[Transaction]] {
+        guard !source.isEmpty else { return [] }
 
-        transactions = snapshot.transactions
-        categories = snapshot.categories.isEmpty ? DefaultData.categories : snapshot.categories
-        accounts = snapshot.accounts.isEmpty ? DefaultData.accounts : snapshot.accounts
-        budgets = snapshot.budgets
-        transfers = snapshot.transfers
-        recurringTransactions = snapshot.recurringTransactions
+        var chunks: [[Transaction]] = []
+        chunks.reserveCapacity((source.count + chunkSize - 1) / chunkSize)
 
-        ensureBuiltInAccounts()
+        var cursor = 0
+        while cursor < source.count {
+            let end = min(cursor + chunkSize, source.count)
+            chunks.append(Array(source[cursor..<end]))
+            cursor = end
+        }
 
-        transactionsStore.save(transactions)
-        categoriesStore.save(categories)
-        accountsStore.save(accounts)
-        budgetsStore.save(budgets)
-        transfersStore.save(transfers)
-        recurringTransactionsStore.save(recurringTransactions)
-
-        iCloudLastSyncedAt = snapshot.syncedAt
-        iCloudSyncStatus = "已开启"
+        return chunks
     }
 
-    private func remoteSnapshotExists() async throws -> Bool {
-        guard let baseURL = webDAVConfiguration.baseURL,
-              let snapshotURL = webDAVConfiguration.snapshotFileURL else {
+    private func fetchRemoteSnapshotManifestRefs() async throws -> [WebDAVSnapshotVersionRef] {
+        guard let baseURL = webDAVConfiguration.baseURL else {
             throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
         }
 
-        try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
-        let data = try await webDAVClient.download(url: snapshotURL, configuration: webDAVConfiguration)
-        return data != nil
+        let fileNames = try await webDAVClient.listFileNames(directoryURL: baseURL, configuration: webDAVConfiguration)
+        return fileNames.compactMap { fileName in
+            guard let version = webDAVConfiguration.parseVersion(fromManifestFileName: fileName) else {
+                return nil
+            }
+            return WebDAVSnapshotVersionRef(version: version, manifestFileName: fileName)
+        }
+        .sorted(by: { $0.version < $1.version })
     }
 
+    private func loadSnapshotVersion(_ ref: WebDAVSnapshotVersionRef) async throws -> ICloudSnapshot {
+        guard let manifestURL = webDAVConfiguration.fileURL(fileName: ref.manifestFileName) else {
+            throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+        }
+
+        guard let manifestPayload = try await webDAVClient.download(url: manifestURL, configuration: webDAVConfiguration) else {
+            throw WebDAVSyncError.snapshotNotFound
+        }
+        guard !manifestPayload.isEmpty else {
+            throw WebDAVSyncError.emptyRemotePayload
+        }
+
+        let manifestData = try decryptSnapshot(manifestPayload)
+        let manifest = try JSONDecoder.appDecoder.decode(WebDAVSnapshotManifest.self, from: manifestData)
+
+        guard manifest.version == ref.version else {
+            throw WebDAVSyncError.invalidSnapshotFormat("云端快照版本不一致")
+        }
+
+        var mergedTransactions: [Transaction] = []
+        mergedTransactions.reserveCapacity(manifest.totalTransactions)
+
+        for chunkFileName in manifest.transactionChunkFileNames {
+            guard let chunkURL = webDAVConfiguration.fileURL(fileName: chunkFileName) else {
+                throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+            }
+
+            guard let chunkPayload = try await webDAVClient.download(url: chunkURL, configuration: webDAVConfiguration) else {
+                throw WebDAVSyncError.invalidSnapshotFormat("云端快照分片缺失：\(chunkFileName)")
+            }
+            guard !chunkPayload.isEmpty else {
+                throw WebDAVSyncError.emptyRemotePayload
+            }
+
+            let chunkData = try decryptSnapshot(chunkPayload)
+            let chunk = try JSONDecoder.appDecoder.decode(WebDAVTransactionChunk.self, from: chunkData)
+            mergedTransactions.append(contentsOf: chunk.transactions)
+        }
+
+        if mergedTransactions.count != manifest.totalTransactions {
+            throw WebDAVSyncError.invalidSnapshotFormat(
+                "云端快照交易条数不匹配（期望 \(manifest.totalTransactions)，实际 \(mergedTransactions.count)）"
+            )
+        }
+
+        return ICloudSnapshot(
+            syncedAt: manifest.syncedAt,
+            transactions: mergedTransactions,
+            categories: manifest.categories,
+            accounts: manifest.accounts,
+            budgets: manifest.budgets,
+            transfers: manifest.transfers,
+            recurringTransactions: manifest.recurringTransactions
+        )
+    }
+
+    private func loadLegacySnapshotIfExists() async throws -> ICloudSnapshot? {
+        guard let legacyURL = webDAVConfiguration.legacySnapshotFileURL else { return nil }
+
+        guard let legacyPayload = try await webDAVClient.download(url: legacyURL, configuration: webDAVConfiguration) else {
+            return nil
+        }
+        guard !legacyPayload.isEmpty else {
+            throw WebDAVSyncError.emptyRemotePayload
+        }
+
+        let decrypted = try decryptSnapshot(legacyPayload)
+        return try JSONDecoder.appDecoder.decode(ICloudSnapshot.self, from: decrypted)
+    }
+
+    private func lastProcessedSnapshotVersion() -> Int {
+        let key = webDAVConfiguration.endpointStateKey
+        guard let values = webDAVSyncProgressDefaults.dictionary(forKey: webDAVSyncProgressStorageKey) as? [String: Int] else {
+            return 0
+        }
+        return values[key] ?? 0
+    }
+
+    private func saveLastProcessedSnapshotVersion(_ version: Int) {
+        let key = webDAVConfiguration.endpointStateKey
+        var values = webDAVSyncProgressDefaults.dictionary(forKey: webDAVSyncProgressStorageKey) as? [String: Int] ?? [:]
+
+        if version <= 0 {
+            values.removeValue(forKey: key)
+        } else {
+            values[key] = version
+        }
+
+        webDAVSyncProgressDefaults.set(values, forKey: webDAVSyncProgressStorageKey)
+    }
+
+    private func remoteSnapshotExists() async throws -> Bool {
+        if !(try await fetchRemoteSnapshotManifestRefs()).isEmpty {
+            return true
+        }
+
+        return try await loadLegacySnapshotIfExists() != nil
+    }
 
     private func verifyWebDAVConfiguration(logFailures: Bool) -> Bool {
         if webDAVConfiguration.baseURL == nil {
@@ -1355,6 +1599,30 @@ final class BillsStore: ObservableObject {
 
         let digest = SHA256.hash(data: Data(raw.utf8))
         return SymmetricKey(data: Data(digest))
+    }
+
+    private func applyICloudSnapshot(_ snapshot: ICloudSnapshot) {
+        isApplyingICloudSnapshot = true
+        defer { isApplyingICloudSnapshot = false }
+
+        transactions = snapshot.transactions
+        categories = snapshot.categories.isEmpty ? DefaultData.categories : snapshot.categories
+        accounts = snapshot.accounts.isEmpty ? DefaultData.accounts : snapshot.accounts
+        budgets = snapshot.budgets
+        transfers = snapshot.transfers
+        recurringTransactions = snapshot.recurringTransactions
+
+        ensureBuiltInAccounts()
+
+        transactionsStore.save(transactions)
+        categoriesStore.save(categories)
+        accountsStore.save(accounts)
+        budgetsStore.save(budgets)
+        transfersStore.save(transfers)
+        recurringTransactionsStore.save(recurringTransactions)
+
+        iCloudLastSyncedAt = snapshot.syncedAt
+        iCloudSyncStatus = "已开启"
     }
 
     private func localSnapshot(syncedAt: Date) -> ICloudSnapshot {

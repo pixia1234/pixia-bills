@@ -44,6 +44,49 @@ struct WebDAVClient {
         try validate(response: response, allow: [200, 204, 207])
     }
 
+    func listFileNames(directoryURL: URL, configuration: WebDAVSyncConfiguration) async throws -> [String] {
+        var request = makeRequest(url: directoryURL.webdavDirectoryURL, method: "PROPFIND", configuration: configuration)
+        request.setValue("1", forHTTPHeaderField: "Depth")
+        request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("""
+        <?xml version=\"1.0\" encoding=\"utf-8\" ?>
+        <d:propfind xmlns:d=\"DAV:\">
+          <d:prop>
+            <d:displayname/>
+            <d:resourcetype/>
+          </d:prop>
+        </d:propfind>
+        """.utf8)
+
+        let (data, response) = try await perform(request)
+        try validate(response: response, data: data, allow: [200, 207])
+
+        guard let xml = String(data: data, encoding: .utf8) else {
+            return []
+        }
+
+        let hrefs = extractHrefValues(from: xml)
+        var results = Set<String>()
+
+        for href in hrefs {
+            let decodedHref = decodeXMLEntities(in: href)
+            let normalized = decodedHref.removingPercentEncoding ?? decodedHref
+            let path: String
+
+            if let url = URL(string: normalized), let host = url.host, !host.isEmpty {
+                path = url.path
+            } else {
+                path = normalized
+            }
+
+            let component = path.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? ""
+            guard !component.isEmpty else { continue }
+            results.insert(component)
+        }
+
+        return results.sorted()
+    }
+
     func download(url: URL, configuration: WebDAVSyncConfiguration) async throws -> Data? {
         let request = makeRequest(url: url, method: "GET", configuration: configuration)
         let (data, response) = try await perform(request)
@@ -182,6 +225,29 @@ struct WebDAVClient {
             }
             throw WebDAVError.unexpectedStatus(code: response.statusCode, message: message)
         }
+    }
+
+    private func extractHrefValues(from xml: String) -> [String] {
+        let pattern = "(?is)<(?:[a-z]+:)?href>(.*?)</(?:[a-z]+:)?href>"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+
+        let nsRange = NSRange(xml.startIndex..<xml.endIndex, in: xml)
+        return regex.matches(in: xml, options: [], range: nsRange).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: xml) else {
+                return nil
+            }
+            return String(xml[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func decodeXMLEntities(in text: String) -> String {
+        text
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
     }
 }
 
