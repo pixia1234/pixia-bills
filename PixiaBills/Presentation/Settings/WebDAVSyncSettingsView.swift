@@ -56,7 +56,41 @@ struct WebDAVSyncSettingsView: View {
                 }
             }
 
-            Section(header: Text("手动同步"), footer: Text("开启同步后会增量拉取新版本，并在本地变更时推送新的分片快照版本（不覆盖历史文件）。以下按钮用于手动排查与强制同步。")) {
+
+            if let conflict = store.syncV2Conflicts.first {
+                Section(header: Text("冲突处理"), footer: Text("当同一条数据本地与云端都改过时，需要手动选择保留本地或采用云端版本。")) {
+                    HStack(alignment: .top) {
+                        Text("实体")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(syncConflictTitle(conflict))
+                            .multilineTextAlignment(.trailing)
+                    }
+
+                    HStack(alignment: .top) {
+                        Text("检测时间")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(Self.syncDateFormatter.string(from: conflict.detectedAt))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Button {
+                        store.resolveSyncV2Conflict(conflict, resolution: .useLocal)
+                    } label: {
+                        Label("保留本地版本", systemImage: "iphone")
+                    }
+
+                    Button {
+                        store.resolveSyncV2Conflict(conflict, resolution: .useRemote)
+                    } label: {
+                        Label("采用云端版本", systemImage: "icloud")
+                    }
+                }
+            }
+
+            Section(header: Text("手动同步"), footer: Text("开启同步后会按 v2 变更日志自动拉取/推送；若变更内容相同将跳过新版本创建。以下按钮用于手动排查与强制同步。")) {
                 Button {
                     Task {
                         let text = await store.refreshICloudSyncStatusNow(configuration: settings.webDAVConfiguration)
@@ -96,5 +130,16 @@ struct WebDAVSyncSettingsView: View {
         .alert(item: $message) { message in
             Alert(title: Text("提示"), message: Text(message.message), dismissButton: .default(Text("知道了")))
         }
+    }
+
+    private static let syncDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    private func syncConflictTitle(_ conflict: SyncV2Conflict) -> String {
+        "\(conflict.entityType.rawValue) / \(conflict.entityId.uuidString.prefix(8))"
     }
 }

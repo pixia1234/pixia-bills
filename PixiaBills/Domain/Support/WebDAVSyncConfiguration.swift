@@ -90,6 +90,23 @@ struct WebDAVSyncConfiguration: Equatable {
         fileURL(fileName: legacySnapshotFileName)
     }
 
+
+    var syncV2IndexFileName: String {
+        "pixia-bills-sync-v2-index.enc"
+    }
+
+    var syncV2IndexFileURL: URL? {
+        fileURL(fileName: syncV2IndexFileName)
+    }
+
+    var syncV2ChangesetPrefix: String {
+        "pixia-bills-sync-v2-cs-"
+    }
+
+    var syncV2ChangesetSuffix: String {
+        ".enc"
+    }
+
     var snapshotManifestPrefix: String {
         "pixia-bills-sync-v"
     }
@@ -118,6 +135,24 @@ struct WebDAVSyncConfiguration: Equatable {
 
     func transactionChunkFileName(version: Int, chunkIndex: Int) -> String {
         String(format: "pixia-bills-sync-v%08d-part-%04d.enc", version, chunkIndex)
+    }
+
+
+    func syncV2ChangesetFileName(sequence: Int) -> String {
+        String(format: "%@%08d%@", syncV2ChangesetPrefix, sequence, syncV2ChangesetSuffix)
+    }
+
+    func parseSyncV2Sequence(fromChangesetFileName fileName: String) -> Int? {
+        guard fileName.hasPrefix(syncV2ChangesetPrefix),
+              fileName.hasSuffix(syncV2ChangesetSuffix) else {
+            return nil
+        }
+
+        let begin = fileName.index(fileName.startIndex, offsetBy: syncV2ChangesetPrefix.count)
+        let end = fileName.index(fileName.endIndex, offsetBy: -syncV2ChangesetSuffix.count)
+        guard begin < end else { return nil }
+
+        return Int(fileName[begin..<end])
     }
 
     func parseVersion(fromManifestFileName fileName: String) -> Int? {

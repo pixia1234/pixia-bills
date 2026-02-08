@@ -12,6 +12,7 @@ final class BillsStore: ObservableObject {
     @Published private(set) var iCloudSyncStatus: String = "未开启"
     @Published private(set) var iCloudLastSyncedAt: Date?
     @Published private(set) var iCloudSyncLogs: [ICloudSyncLog] = []
+    @Published private(set) var syncV2Conflicts: [SyncV2Conflict] = []
 
     private let transactionsStore = JSONFileStore(filename: "transactions.json")
     private let categoriesStore = JSONFileStore(filename: "categories.json")
@@ -25,6 +26,10 @@ final class BillsStore: ObservableObject {
     private let deletedBudgetMarkersStore = JSONFileStore(filename: "deleted-budget-markers.json")
     private let deletedTransferMarkersStore = JSONFileStore(filename: "deleted-transfer-markers.json")
     private let deletedRecurringMarkersStore = JSONFileStore(filename: "deleted-recurring-markers.json")
+    private let syncV2OutboxStore = JSONFileStore(filename: "sync-v2-outbox.json")
+    private let syncV2AppliedEventIDsStore = JSONFileStore(filename: "sync-v2-applied-event-ids.json")
+    private let syncV2IgnoredEventIDsStore = JSONFileStore(filename: "sync-v2-ignored-event-ids.json")
+    private let syncV2ConflictsStore = JSONFileStore(filename: "sync-v2-conflicts.json")
 
     private struct EntityDeletionMarker: Codable, Equatable {
         let id: UUID
@@ -266,6 +271,7 @@ final class BillsStore: ObservableObject {
 
     private var iCloudSyncEnabled = false
     private var isApplyingICloudSnapshot = false
+    private var isApplyingSyncV2Remote = false
     private var webDAVConfiguration = WebDAVSyncConfiguration()
     private let webDAVClient = WebDAVClient()
 
@@ -282,8 +288,15 @@ final class BillsStore: ObservableObject {
     private var deletedTransferMarkers: [EntityDeletionMarker] = []
     private var deletedRecurringMarkers: [EntityDeletionMarker] = []
 
+    private var syncV2Outbox: [SyncV2Event] = []
+    private var syncV2AppliedEventIDs: Set<UUID> = []
+    private var syncV2IgnoredEventIDs: Set<UUID> = []
+    private var syncV2DeviceID: String = UUID().uuidString
+
     private let webDAVSyncProgressDefaults = UserDefaults.standard
     private let webDAVSyncProgressStorageKey = "sync.webdav.last_processed_manifest_versions"
+    private let webDAVSyncV2ProgressStorageKey = "sync.webdav.v2.last_processed_sequence"
+    private let webDAVSyncV2DeviceIDStorageKey = "sync.webdav.v2.device_id"
 
     init() {
         load()
@@ -291,6 +304,10 @@ final class BillsStore: ObservableObject {
 
     var defaultAccountId: UUID {
         accounts.first?.id ?? DefaultData.accounts[0].id
+    }
+
+    var hasPendingSyncV2Conflicts: Bool {
+        !syncV2Conflicts.isEmpty
     }
 
     func load() {
@@ -306,6 +323,20 @@ final class BillsStore: ObservableObject {
         deletedBudgetMarkers = deletedBudgetMarkersStore.load([EntityDeletionMarker].self, default: [])
         deletedTransferMarkers = deletedTransferMarkersStore.load([EntityDeletionMarker].self, default: [])
         deletedRecurringMarkers = deletedRecurringMarkersStore.load([EntityDeletionMarker].self, default: [])
+
+        syncV2Outbox = syncV2OutboxStore.load([SyncV2Event].self, default: [])
+        syncV2AppliedEventIDs = Set(syncV2AppliedEventIDsStore.load([UUID].self, default: []))
+        syncV2IgnoredEventIDs = Set(syncV2IgnoredEventIDsStore.load([UUID].self, default: []))
+        syncV2Conflicts = syncV2ConflictsStore.load([SyncV2Conflict].self, default: [])
+        syncV2Conflicts.removeAll {
+            syncV2AppliedEventIDs.contains($0.remoteEvent.id) || syncV2IgnoredEventIDs.contains($0.remoteEvent.id)
+        }
+        if let savedDeviceID = webDAVSyncProgressDefaults.string(forKey: webDAVSyncV2DeviceIDStorageKey), !savedDeviceID.isEmpty {
+            syncV2DeviceID = savedDeviceID
+        } else {
+            syncV2DeviceID = UUID().uuidString
+            webDAVSyncProgressDefaults.set(syncV2DeviceID, forKey: webDAVSyncV2DeviceIDStorageKey)
+        }
 
         let transactionResolution = resolveEntitiesAgainstDeletionMarkers(
             transactions,
@@ -459,21 +490,15 @@ final class BillsStore: ObservableObject {
 
         do {
             try await webDAVClient.ping(directoryURL: baseURL, configuration: webDAVConfiguration)
-            let refs = try await fetchRemoteSnapshotManifestRefs()
+            if let index = try await fetchRemoteSyncV2Index() {
+                iCloudSyncStatus = "已连接"
+                addICloudLog("状态检查：WebDAV 连接正常，检测到 v2 变更版本 \(index.latestSequence)")
+                return "WebDAV 连接正常，检测到 v2 变更版本 \(index.latestSequence)"
+            }
 
             iCloudSyncStatus = "已连接"
-            if let latest = refs.last {
-                addICloudLog("状态检查：WebDAV 连接正常，检测到 \(refs.count) 个快照版本（最新 v\(latest.version)）")
-                return "WebDAV 连接正常，检测到 \(refs.count) 个快照版本（最新 v\(latest.version)）"
-            }
-
-            if (try? await loadLegacySnapshotIfExists()) != nil {
-                addICloudLog("状态检查：仅检测到旧版单文件快照，首次同步会自动迁移")
-                return "WebDAV 连接正常，仅检测到旧版单文件快照，首次同步会自动迁移"
-            }
-
-            addICloudLog("状态检查：WebDAV 连接正常，但云端暂无版本快照")
-            return "WebDAV 连接正常，但云端暂无版本快照"
+            addICloudLog("状态检查：WebDAV 连接正常，但云端暂无 v2 变更数据")
+            return "WebDAV 连接正常，但云端暂无 v2 变更数据"
         } catch {
             iCloudSyncStatus = "同步失败"
             addICloudLog("状态检查：WebDAV 连接失败（\(error.localizedDescription)）")
@@ -496,12 +521,11 @@ final class BillsStore: ObservableObject {
 
         iCloudSyncEnabled = true
         iCloudSyncStatus = "同步中"
-        let success = await pullSnapshotFromICloud(
-            mode: .mergeWithLocal,
-            trigger: "手动拉取",
-            requireIncremental: false
-        )
-        return success ? "拉取成功，已按增量版本合并本地与云端数据" : "拉取失败，请查看同步日志"
+        let success = await pullChangesFromWebDAVV2(trigger: "手动拉取")
+        if !syncV2Conflicts.isEmpty {
+            return "拉取完成，但有 \(syncV2Conflicts.count) 个冲突等待选择"
+        }
+        return success ? "拉取成功，已按变更日志应用到本地" : "拉取失败，请查看同步日志"
     }
 
     @discardableResult
@@ -519,11 +543,11 @@ final class BillsStore: ObservableObject {
 
         iCloudSyncEnabled = true
         iCloudSyncStatus = "同步中"
-        let success = await pushSnapshotToICloud(trigger: "手动推送")
+        let success = await pushChangesToWebDAVV2(trigger: "手动推送")
         if success {
             webDAVHasPendingLocalChanges = false
         }
-        return success ? "推送成功，云端数据已更新" : "推送失败，请查看同步日志"
+        return success ? "推送成功，云端变更已更新" : "推送失败，请查看同步日志"
     }
 
     @discardableResult
@@ -536,6 +560,34 @@ final class BillsStore: ObservableObject {
         iCloudSyncLogs.removeAll()
     }
 
+    func resolveSyncV2Conflict(_ conflict: SyncV2Conflict, resolution: SyncV2ConflictResolution) {
+        guard let index = syncV2Conflicts.firstIndex(where: { $0.id == conflict.id }) else { return }
+
+        switch resolution {
+        case .useLocal:
+            syncV2IgnoredEventIDs.insert(conflict.remoteEvent.id)
+            syncV2AppliedEventIDs.insert(conflict.remoteEvent.id)
+            addICloudLog("冲突已解决：保留本地 \(conflict.entityType.rawValue) \(conflict.entityId.uuidString.prefix(8))")
+        case .useRemote:
+            isApplyingSyncV2Remote = true
+            applyRemoteSyncV2Event(conflict.remoteEvent, force: true)
+            isApplyingSyncV2Remote = false
+            syncV2Outbox.removeAll {
+                $0.entityType == conflict.entityType && $0.entityId == conflict.entityId
+            }
+            syncV2AppliedEventIDs.insert(conflict.remoteEvent.id)
+            addICloudLog("冲突已解决：采用云端 \(conflict.entityType.rawValue) \(conflict.entityId.uuidString.prefix(8))")
+        }
+
+        syncV2Conflicts.remove(at: index)
+        persistSyncV2Metadata(scheduleSync: false)
+    }
+
+    func resolveFirstSyncV2Conflict(resolution: SyncV2ConflictResolution) {
+        guard let first = syncV2Conflicts.first else { return }
+        resolveSyncV2Conflict(first, resolution: resolution)
+    }
+
     private func enableWebDAVSyncFlow() async {
         guard iCloudSyncEnabled else { return }
         guard verifyWebDAVConfiguration(logFailures: true) else {
@@ -544,20 +596,7 @@ final class BillsStore: ObservableObject {
         }
 
         iCloudSyncStatus = "同步中"
-        do {
-            let hasRemote = try await remoteSnapshotExists()
-            if hasRemote {
-                webDAVHasPendingLocalChanges = hasUserGeneratedData()
-                _ = await syncSnapshotWithWebDAV(trigger: "首次开启")
-            } else {
-                webDAVHasPendingLocalChanges = true
-                _ = await pushSnapshotToICloud(trigger: "首次开启")
-                webDAVHasPendingLocalChanges = false
-            }
-        } catch {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("首次开启：WebDAV 连接失败（\(error.localizedDescription)）")
-        }
+        _ = await syncChangesWithWebDAVV2(trigger: "首次开启")
     }
 
     private func runWebDAVAutoSyncWorker() async {
@@ -591,7 +630,7 @@ final class BillsStore: ObservableObject {
             }
 
             webDAVAutoSyncTrigger = nil
-            _ = await syncSnapshotWithWebDAV(trigger: trigger)
+            _ = await syncChangesWithWebDAVV2(trigger: trigger)
         }
     }
 
@@ -618,6 +657,7 @@ final class BillsStore: ObservableObject {
         )
         transactions.insert(transaction, at: 0)
         removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
+        queueSyncV2TransactionUpsert(transaction, baseUpdatedAt: nil)
         persistTransactions()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -656,6 +696,7 @@ final class BillsStore: ObservableObject {
             )
             transactions.insert(transaction, at: 0)
             removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
+            queueSyncV2TransactionUpsert(transaction, baseUpdatedAt: nil)
             imported += 1
         }
 
@@ -682,6 +723,7 @@ final class BillsStore: ObservableObject {
         )
         accounts.append(account)
         removeDeletionMarkers(matching: [account.id], from: &deletedAccountMarkers)
+        queueSyncV2AccountUpsert(account, baseUpdatedAt: nil)
         persistAccounts()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -691,10 +733,12 @@ final class BillsStore: ObservableObject {
 
         var updated = account
         updated.createdAt = accounts[index].createdAt
+        let baseUpdatedAt = accounts[index].updatedAt
         updated.updatedAt = Date()
 
         accounts[index] = updated
         removeDeletionMarkers(matching: [account.id], from: &deletedAccountMarkers)
+        queueSyncV2AccountUpsert(updated, baseUpdatedAt: baseUpdatedAt)
         persistAccounts()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -735,6 +779,9 @@ final class BillsStore: ObservableObject {
             deletedAccountMarkers,
             deletableIds.map { EntityDeletionMarker(id: $0, deletedAt: now) }
         )
+        for id in deletableIds {
+            queueSyncV2AccountDelete(id: id, deletedAt: now, baseUpdatedAt: nil)
+        }
         persistAccounts()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -791,6 +838,7 @@ final class BillsStore: ObservableObject {
         )
         transfers.insert(transfer, at: 0)
         removeDeletionMarkers(matching: [transfer.id], from: &deletedTransferMarkers)
+        queueSyncV2TransferUpsert(transfer, baseUpdatedAt: nil)
         persistTransfers()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -804,6 +852,9 @@ final class BillsStore: ObservableObject {
             deletedTransferMarkers,
             ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
         )
+        for id in ids {
+            queueSyncV2TransferDelete(id: id, deletedAt: now, baseUpdatedAt: nil)
+        }
         persistTransfers()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -821,9 +872,11 @@ final class BillsStore: ObservableObject {
             $0.type == type &&
             $0.categoryId == categoryId
         }) {
+            let baseUpdatedAt = budgets[index].updatedAt
             budgets[index].limit = limit
             budgets[index].updatedAt = Date()
             removeDeletionMarkers(matching: [budgets[index].id], from: &deletedBudgetMarkers)
+            queueSyncV2BudgetUpsert(budgets[index], baseUpdatedAt: baseUpdatedAt)
         } else {
             let now = Date()
             let budget = Budget(
@@ -837,6 +890,7 @@ final class BillsStore: ObservableObject {
             )
             budgets.append(budget)
             removeDeletionMarkers(matching: [budget.id], from: &deletedBudgetMarkers)
+            queueSyncV2BudgetUpsert(budget, baseUpdatedAt: nil)
         }
         persistBudgets()
         persistDeletionMarkers(scheduleSync: false)
@@ -844,8 +898,10 @@ final class BillsStore: ObservableObject {
 
     func deleteBudget(_ budget: Budget) {
         budgets.removeAll(where: { $0.id == budget.id })
-        let marker = EntityDeletionMarker(id: budget.id, deletedAt: Date())
+        let now = Date()
+        let marker = EntityDeletionMarker(id: budget.id, deletedAt: now)
         deletedBudgetMarkers = mergeDeletionMarkers(deletedBudgetMarkers, [marker])
+        queueSyncV2BudgetDelete(id: budget.id, deletedAt: now, baseUpdatedAt: nil)
         persistBudgets()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -904,6 +960,7 @@ final class BillsStore: ObservableObject {
         )
         recurringTransactions.append(recurring)
         removeDeletionMarkers(matching: [recurring.id], from: &deletedRecurringMarkers)
+        queueSyncV2RecurringUpsert(recurring, baseUpdatedAt: nil)
         persistRecurringTransactions()
         persistDeletionMarkers(scheduleSync: false)
         applyRecurringTransactionsIfNeeded()
@@ -911,9 +968,11 @@ final class BillsStore: ObservableObject {
 
     func toggleRecurringTransaction(_ recurring: RecurringTransaction, isEnabled: Bool) {
         guard let index = recurringTransactions.firstIndex(where: { $0.id == recurring.id }) else { return }
+        let baseUpdatedAt = recurringTransactions[index].updatedAt
         recurringTransactions[index].isEnabled = isEnabled
         recurringTransactions[index].updatedAt = Date()
         removeDeletionMarkers(matching: [recurring.id], from: &deletedRecurringMarkers)
+        queueSyncV2RecurringUpsert(recurringTransactions[index], baseUpdatedAt: baseUpdatedAt)
         persistRecurringTransactions()
         persistDeletionMarkers(scheduleSync: false)
 
@@ -931,6 +990,9 @@ final class BillsStore: ObservableObject {
             deletedRecurringMarkers,
             ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
         )
+        for id in ids {
+            queueSyncV2RecurringDelete(id: id, deletedAt: now, baseUpdatedAt: nil)
+        }
         persistRecurringTransactions()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -952,6 +1014,9 @@ final class BillsStore: ObservableObject {
             deletedTransactionMarkers,
             ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
         )
+        for id in ids {
+            queueSyncV2TransactionDelete(id: id, deletedAt: now, baseUpdatedAt: nil)
+        }
         persistTransactions()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -1015,6 +1080,7 @@ final class BillsStore: ObservableObject {
         )
         categories.append(category)
         removeDeletionMarkers(matching: [category.id], from: &deletedCategoryMarkers)
+        queueSyncV2CategoryUpsert(category, baseUpdatedAt: nil)
         persistCategories()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -1024,10 +1090,12 @@ final class BillsStore: ObservableObject {
 
         var updated = category
         updated.createdAt = categories[index].createdAt
+        let baseUpdatedAt = categories[index].updatedAt
         updated.updatedAt = Date()
 
         categories[index] = updated
         removeDeletionMarkers(matching: [category.id], from: &deletedCategoryMarkers)
+        queueSyncV2CategoryUpsert(updated, baseUpdatedAt: baseUpdatedAt)
         persistCategories()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -1042,6 +1110,9 @@ final class BillsStore: ObservableObject {
             deletedCategoryMarkers,
             ids.map { EntityDeletionMarker(id: $0, deletedAt: now) }
         )
+        for id in ids {
+            queueSyncV2CategoryDelete(id: id, deletedAt: now, baseUpdatedAt: nil)
+        }
         persistCategories()
         persistDeletionMarkers(scheduleSync: false)
     }
@@ -1051,12 +1122,20 @@ final class BillsStore: ObservableObject {
         moveItems(&typed, from: source, to: destination)
 
         let now = Date()
+        let previousById = Dictionary(uniqueKeysWithValues: categories.map { ($0.id, $0) })
 
         let orderById = Dictionary(uniqueKeysWithValues: typed.enumerated().map { ($1.id, $0) })
         categories = categories.map { category in
             guard category.type == type, let order = orderById[category.id] else { return category }
             return category.with(sortOrder: order, updatedAt: now)
         }
+
+        for category in categories where category.type == type {
+            guard let previous = previousById[category.id] else { continue }
+            guard previous.sortOrder != category.sortOrder else { continue }
+            queueSyncV2CategoryUpsert(category, baseUpdatedAt: previous.updatedAt)
+        }
+
         persistCategories()
     }
 
@@ -1201,6 +1280,7 @@ final class BillsStore: ObservableObject {
             )
             transactions.insert(transaction, at: 0)
             removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
+            queueSyncV2TransactionUpsert(transaction, baseUpdatedAt: nil)
             importedCount += 1
         }
 
@@ -1257,6 +1337,7 @@ final class BillsStore: ObservableObject {
                 continue
             }
             accounts.append(account)
+            queueSyncV2AccountUpsert(account, baseUpdatedAt: nil)
             changed = true
         }
 
@@ -1312,6 +1393,7 @@ final class BillsStore: ObservableObject {
                         updatedAt: Date()
                     )
                     transactions.insert(transaction, at: 0)
+                    queueSyncV2TransactionUpsert(transaction, baseUpdatedAt: nil)
                     transactionsChanged = true
                     didGenerate = true
                     lastGeneratedDate = cursor
@@ -1320,9 +1402,11 @@ final class BillsStore: ObservableObject {
             }
 
             if didGenerate, let lastGeneratedDate {
+                let baseUpdatedAt = recurring.updatedAt
                 recurring.lastGeneratedAt = lastGeneratedDate
                 recurring.updatedAt = Date()
                 recurringTransactions[index] = recurring
+                queueSyncV2RecurringUpsert(recurring, baseUpdatedAt: baseUpdatedAt)
                 recurringChanged = true
             }
         }
@@ -1467,6 +1551,7 @@ final class BillsStore: ObservableObject {
             )
             categories.append(newCategory)
             removeDeletionMarkers(matching: [newCategory.id], from: &deletedCategoryMarkers)
+            queueSyncV2CategoryUpsert(newCategory, baseUpdatedAt: nil)
             didCreate = true
             return newCategory
         }
@@ -1485,6 +1570,7 @@ final class BillsStore: ObservableObject {
         )
         categories.append(fallbackCategory)
         removeDeletionMarkers(matching: [fallbackCategory.id], from: &deletedCategoryMarkers)
+        queueSyncV2CategoryUpsert(fallbackCategory, baseUpdatedAt: nil)
         didCreate = true
         return fallbackCategory
     }
@@ -1499,6 +1585,7 @@ final class BillsStore: ObservableObject {
             let account = Account(id: UUID(), name: trimmed, type: .cash, initialBalance: 0)
             accounts.append(account)
             removeDeletionMarkers(matching: [account.id], from: &deletedAccountMarkers)
+            queueSyncV2AccountUpsert(account, baseUpdatedAt: nil)
             didCreate = true
             return account
         }
@@ -1540,131 +1627,15 @@ final class BillsStore: ObservableObject {
 
     @discardableResult
     private func syncSnapshotWithWebDAV(trigger: String) async -> Bool {
-        guard iCloudSyncEnabled else { return false }
-        guard verifyWebDAVConfiguration(logFailures: true) else {
-            iCloudSyncStatus = "配置不完整"
-            return false
-        }
-
-        iCloudSyncStatus = "同步中"
-
-        do {
-            let remoteRefs = try await fetchRemoteSnapshotManifestRefs()
-            if !remoteRefs.isEmpty {
-                let pulled = await pullSnapshotFromICloud(
-                    mode: .mergeWithLocal,
-                    trigger: "\(trigger)：增量拉取",
-                    knownRefs: remoteRefs,
-                    requireIncremental: true
-                )
-                guard pulled else { return false }
-            } else if let legacySnapshot = try await loadLegacySnapshotIfExists() {
-                let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: legacySnapshot)
-                applyICloudSnapshot(merged)
-                addICloudLog("\(trigger)：已迁移旧版单文件快照")
-            }
-
-            guard webDAVHasPendingLocalChanges || remoteRefs.isEmpty else {
-                iCloudSyncStatus = "已开启"
-                addICloudLog("\(trigger)：无本地新增变更，已跳过推送")
-                return true
-            }
-
-            let snapshot = localSnapshot(syncedAt: Date())
-            let pushed = await pushSnapshotToICloud(trigger: "\(trigger)：版本推送", snapshot: snapshot)
-            if pushed {
-                webDAVHasPendingLocalChanges = false
-            }
-            return pushed
-        } catch {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：WebDAV 同步失败（\(error.localizedDescription)）")
-            return false
-        }
+        await syncChangesWithWebDAVV2(trigger: trigger)
     }
+
 
     @discardableResult
     private func pushSnapshotToICloud(trigger: String, snapshot: ICloudSnapshot? = nil) async -> Bool {
-        guard iCloudSyncEnabled else { return false }
-        guard verifyWebDAVConfiguration(logFailures: true) else {
-            iCloudSyncEnabled = false
-            return false
-        }
-        guard let baseURL = webDAVConfiguration.baseURL else {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
-            return false
-        }
-
-        let snapshot = snapshot ?? localSnapshot(syncedAt: Date())
-
-        do {
-            try await webDAVClient.ensureDirectoryExists(directoryURL: baseURL, configuration: webDAVConfiguration)
-
-            let remoteRefs = try await fetchRemoteSnapshotManifestRefs()
-            let nextVersion = (remoteRefs.last?.version ?? 0) + 1
-            let chunkSize = max(1, webDAVConfiguration.transactionChunkSize)
-            let transactionChunks = chunkedTransactions(snapshot.transactions, chunkSize: chunkSize)
-            let chunkFileNames = transactionChunks.indices.map {
-                webDAVConfiguration.transactionChunkFileName(version: nextVersion, chunkIndex: $0 + 1)
-            }
-
-            for (index, chunkTransactions) in transactionChunks.enumerated() {
-                let chunk = WebDAVTransactionChunk(
-                    version: nextVersion,
-                    chunkIndex: index + 1,
-                    transactions: chunkTransactions
-                )
-                let encodedChunk = try JSONEncoder.appEncoder.encode(chunk)
-                let encryptedChunk = try encryptSnapshot(encodedChunk)
-
-                guard let chunkURL = webDAVConfiguration.fileURL(fileName: chunkFileNames[index]) else {
-                    throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
-                }
-
-                try await webDAVClient.upload(data: encryptedChunk, url: chunkURL, configuration: webDAVConfiguration)
-            }
-
-            let manifest = WebDAVSnapshotManifest(
-                version: nextVersion,
-                syncedAt: snapshot.syncedAt,
-                transactionChunkSize: chunkSize,
-                totalTransactions: snapshot.transactions.count,
-                transactionChunkFileNames: chunkFileNames,
-                categories: snapshot.categories,
-                accounts: snapshot.accounts,
-                budgets: snapshot.budgets,
-                transfers: snapshot.transfers,
-                recurringTransactions: snapshot.recurringTransactions,
-                deletedTransactionMarkers: snapshot.deletedTransactionMarkers,
-                deletedCategoryMarkers: snapshot.deletedCategoryMarkers,
-                deletedAccountMarkers: snapshot.deletedAccountMarkers,
-                deletedBudgetMarkers: snapshot.deletedBudgetMarkers,
-                deletedTransferMarkers: snapshot.deletedTransferMarkers,
-                deletedRecurringMarkers: snapshot.deletedRecurringMarkers
-            )
-
-            let encodedManifest = try JSONEncoder.appEncoder.encode(manifest)
-            let encryptedManifest = try encryptSnapshot(encodedManifest)
-            let manifestFileName = webDAVConfiguration.manifestFileName(version: nextVersion)
-
-            guard let manifestURL = webDAVConfiguration.fileURL(fileName: manifestFileName) else {
-                throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
-            }
-
-            try await webDAVClient.upload(data: encryptedManifest, url: manifestURL, configuration: webDAVConfiguration)
-
-            saveLastProcessedSnapshotVersion(nextVersion)
-            iCloudLastSyncedAt = snapshot.syncedAt
-            iCloudSyncStatus = "已开启"
-            addICloudLog("\(trigger)：WebDAV 推送成功（v\(nextVersion)，分片 \(max(chunkFileNames.count, 1)) 个）")
-            return true
-        } catch {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：WebDAV 推送失败（\(error.localizedDescription)）")
-            return false
-        }
+        await pushChangesToWebDAVV2(trigger: trigger)
     }
+
 
     @discardableResult
     private func pullSnapshotFromICloud(
@@ -1673,74 +1644,9 @@ final class BillsStore: ObservableObject {
         knownRefs: [WebDAVSnapshotVersionRef]? = nil,
         requireIncremental: Bool = true
     ) async -> Bool {
-        guard iCloudSyncEnabled else { return false }
-        guard verifyWebDAVConfiguration(logFailures: true) else {
-            iCloudSyncEnabled = false
-            return false
-        }
-
-        do {
-            let refs: [WebDAVSnapshotVersionRef]
-            if let knownRefs {
-                refs = knownRefs
-            } else {
-                refs = try await fetchRemoteSnapshotManifestRefs()
-            }
-
-            if refs.isEmpty {
-                if let legacySnapshot = try await loadLegacySnapshotIfExists() {
-                    switch mode {
-                    case .replaceLocal:
-                        applyICloudSnapshot(legacySnapshot)
-                    case .mergeWithLocal:
-                        let merged = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: legacySnapshot)
-                        applyICloudSnapshot(merged)
-                    }
-                    iCloudSyncStatus = "已开启"
-                    addICloudLog("\(trigger)：已从旧版单文件快照拉取")
-                    return true
-                }
-
-                iCloudSyncStatus = "云端暂无数据"
-                addICloudLog("\(trigger)：云端暂无同步快照")
-                return false
-            }
-
-            guard let latest = refs.last else {
-                throw WebDAVSyncError.snapshotNotFound
-            }
-
-            let lastVersion = lastProcessedSnapshotVersion()
-            if latest.version <= lastVersion, requireIncremental {
-                iCloudSyncStatus = "已开启"
-                addICloudLog("\(trigger)：没有新的增量版本")
-                return true
-            }
-
-            let remoteSnapshot = try await loadSnapshotVersion(latest)
-            let finalSnapshot: ICloudSnapshot
-            switch mode {
-            case .replaceLocal:
-                finalSnapshot = remoteSnapshot
-            case .mergeWithLocal:
-                finalSnapshot = mergeSnapshots(local: localSnapshot(syncedAt: Date()), remote: remoteSnapshot)
-            }
-
-            applyICloudSnapshot(finalSnapshot)
-            saveLastProcessedSnapshotVersion(latest.version)
-            iCloudSyncStatus = "已开启"
-            if latest.version > lastVersion {
-                addICloudLog("\(trigger)：已应用增量快照至 v\(latest.version)")
-            } else {
-                addICloudLog("\(trigger)：已重新拉取 v\(latest.version)")
-            }
-            return true
-        } catch {
-            iCloudSyncStatus = "同步失败"
-            addICloudLog("\(trigger)：WebDAV 拉取失败（\(error.localizedDescription)）")
-            return false
-        }
+        await pullChangesFromWebDAVV2(trigger: trigger)
     }
+
 
     private func chunkedTransactions(_ source: [Transaction], chunkSize: Int) -> [[Transaction]] {
         guard !source.isEmpty else { return [] }
@@ -2297,5 +2203,787 @@ final class BillsStore: ObservableObject {
         let adjustedDestination = destination - sourceIndexes.filter { $0 < destination }.count
         let insertIndex = max(0, min(adjustedDestination, array.count))
         array.insert(contentsOf: items, at: insertIndex)
+    }
+}
+
+private extension BillsStore {
+    struct SyncV2LocalEntityState {
+        let payload: Data?
+        let payloadHash: String?
+        let updatedAt: Date?
+        let deletedAt: Date?
+    }
+
+    struct SyncV2RemoteRef {
+        let sequence: Int
+        let fileName: String
+    }
+
+    func queueSyncV2TransactionUpsert(_ transaction: Transaction, baseUpdatedAt: Date?) {
+        guard let payload = encodedSyncV2Payload(transaction) else { return }
+        queueSyncV2Event(
+            operation: .upsert,
+            entityType: .transaction,
+            entityId: transaction.id,
+            payload: payload,
+            entityUpdatedAt: transaction.updatedAt,
+            deletedAt: nil,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2TransactionDelete(id: UUID, deletedAt: Date, baseUpdatedAt: Date?) {
+        queueSyncV2Event(
+            operation: .delete,
+            entityType: .transaction,
+            entityId: id,
+            payload: nil,
+            entityUpdatedAt: deletedAt,
+            deletedAt: deletedAt,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2CategoryUpsert(_ category: Category, baseUpdatedAt: Date?) {
+        guard let payload = encodedSyncV2Payload(category) else { return }
+        queueSyncV2Event(
+            operation: .upsert,
+            entityType: .category,
+            entityId: category.id,
+            payload: payload,
+            entityUpdatedAt: category.updatedAt,
+            deletedAt: nil,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2CategoryDelete(id: UUID, deletedAt: Date, baseUpdatedAt: Date?) {
+        queueSyncV2Event(
+            operation: .delete,
+            entityType: .category,
+            entityId: id,
+            payload: nil,
+            entityUpdatedAt: deletedAt,
+            deletedAt: deletedAt,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2AccountUpsert(_ account: Account, baseUpdatedAt: Date?) {
+        guard let payload = encodedSyncV2Payload(account) else { return }
+        queueSyncV2Event(
+            operation: .upsert,
+            entityType: .account,
+            entityId: account.id,
+            payload: payload,
+            entityUpdatedAt: account.updatedAt,
+            deletedAt: nil,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2AccountDelete(id: UUID, deletedAt: Date, baseUpdatedAt: Date?) {
+        queueSyncV2Event(
+            operation: .delete,
+            entityType: .account,
+            entityId: id,
+            payload: nil,
+            entityUpdatedAt: deletedAt,
+            deletedAt: deletedAt,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2BudgetUpsert(_ budget: Budget, baseUpdatedAt: Date?) {
+        guard let payload = encodedSyncV2Payload(budget) else { return }
+        queueSyncV2Event(
+            operation: .upsert,
+            entityType: .budget,
+            entityId: budget.id,
+            payload: payload,
+            entityUpdatedAt: budget.updatedAt,
+            deletedAt: nil,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2BudgetDelete(id: UUID, deletedAt: Date, baseUpdatedAt: Date?) {
+        queueSyncV2Event(
+            operation: .delete,
+            entityType: .budget,
+            entityId: id,
+            payload: nil,
+            entityUpdatedAt: deletedAt,
+            deletedAt: deletedAt,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2TransferUpsert(_ transfer: Transfer, baseUpdatedAt: Date?) {
+        guard let payload = encodedSyncV2Payload(transfer) else { return }
+        queueSyncV2Event(
+            operation: .upsert,
+            entityType: .transfer,
+            entityId: transfer.id,
+            payload: payload,
+            entityUpdatedAt: transfer.updatedAt,
+            deletedAt: nil,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2TransferDelete(id: UUID, deletedAt: Date, baseUpdatedAt: Date?) {
+        queueSyncV2Event(
+            operation: .delete,
+            entityType: .transfer,
+            entityId: id,
+            payload: nil,
+            entityUpdatedAt: deletedAt,
+            deletedAt: deletedAt,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2RecurringUpsert(_ recurring: RecurringTransaction, baseUpdatedAt: Date?) {
+        guard let payload = encodedSyncV2Payload(recurring) else { return }
+        queueSyncV2Event(
+            operation: .upsert,
+            entityType: .recurring,
+            entityId: recurring.id,
+            payload: payload,
+            entityUpdatedAt: recurring.updatedAt,
+            deletedAt: nil,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2RecurringDelete(id: UUID, deletedAt: Date, baseUpdatedAt: Date?) {
+        queueSyncV2Event(
+            operation: .delete,
+            entityType: .recurring,
+            entityId: id,
+            payload: nil,
+            entityUpdatedAt: deletedAt,
+            deletedAt: deletedAt,
+            baseUpdatedAt: baseUpdatedAt
+        )
+    }
+
+    func queueSyncV2Event(
+        operation: SyncV2Operation,
+        entityType: SyncV2EntityType,
+        entityId: UUID,
+        payload: Data?,
+        entityUpdatedAt: Date,
+        deletedAt: Date?,
+        baseUpdatedAt: Date?
+    ) {
+        guard !isApplyingICloudSnapshot else { return }
+        guard !isApplyingSyncV2Remote else { return }
+
+        let payloadHash = payload.map(sha256Hex)
+
+        if let latest = syncV2Outbox.last(where: { $0.entityType == entityType && $0.entityId == entityId }) {
+            if latest.operation == operation,
+               latest.payloadHash == payloadHash,
+               latest.deletedAt == deletedAt {
+                return
+            }
+        }
+
+        let event = SyncV2Event(
+            deviceId: syncV2DeviceID,
+            createdAt: Date(),
+            entityType: entityType,
+            operation: operation,
+            entityId: entityId,
+            baseUpdatedAt: baseUpdatedAt,
+            entityUpdatedAt: entityUpdatedAt,
+            payload: payload,
+            payloadHash: payloadHash,
+            deletedAt: deletedAt
+        )
+
+        syncV2Outbox.append(event)
+        webDAVHasPendingLocalChanges = true
+        persistSyncV2Metadata(scheduleSync: true)
+    }
+
+    func persistSyncV2Metadata(scheduleSync: Bool = false) {
+        syncV2OutboxStore.save(syncV2Outbox)
+        syncV2AppliedEventIDsStore.save(syncV2AppliedEventIDs.map(\.self).sorted { $0.uuidString < $1.uuidString })
+        syncV2IgnoredEventIDsStore.save(syncV2IgnoredEventIDs.map(\.self).sorted { $0.uuidString < $1.uuidString })
+        syncV2ConflictsStore.save(syncV2Conflicts)
+
+        if scheduleSync {
+            scheduleWebDAVSyncIfNeeded()
+        }
+    }
+
+    func encodedSyncV2Payload<T: Encodable>(_ value: T) -> Data? {
+        try? JSONEncoder.appEncoder.encode(value)
+    }
+
+    func decodedSyncV2Payload<T: Decodable>(_ data: Data?, as type: T.Type) -> T? {
+        guard let data else { return nil }
+        return try? JSONDecoder.appDecoder.decode(type, from: data)
+    }
+
+    func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func syncV2Digest(for events: [SyncV2Event]) -> String {
+        struct Signature: Codable {
+            let entityType: SyncV2EntityType
+            let operation: SyncV2Operation
+            let entityId: UUID
+            let payloadHash: String?
+            let deletedAt: Date?
+            let baseUpdatedAt: Date?
+            let entityUpdatedAt: Date
+        }
+
+        let signatures = events.map {
+            Signature(
+                entityType: $0.entityType,
+                operation: $0.operation,
+                entityId: $0.entityId,
+                payloadHash: $0.payloadHash,
+                deletedAt: $0.deletedAt,
+                baseUpdatedAt: $0.baseUpdatedAt,
+                entityUpdatedAt: $0.entityUpdatedAt
+            )
+        }
+
+        let data = (try? JSONEncoder.appEncoder.encode(signatures)) ?? Data()
+        return sha256Hex(data)
+    }
+
+    func lastProcessedSyncV2Sequence() -> Int {
+        let key = webDAVConfiguration.endpointStateKey
+        guard let values = webDAVSyncProgressDefaults.dictionary(forKey: webDAVSyncV2ProgressStorageKey) as? [String: Int] else {
+            return 0
+        }
+        return values[key] ?? 0
+    }
+
+    func saveLastProcessedSyncV2Sequence(_ sequence: Int) {
+        let key = webDAVConfiguration.endpointStateKey
+        var values = webDAVSyncProgressDefaults.dictionary(forKey: webDAVSyncV2ProgressStorageKey) as? [String: Int] ?? [:]
+        if sequence <= 0 {
+            values.removeValue(forKey: key)
+        } else {
+            values[key] = sequence
+        }
+        webDAVSyncProgressDefaults.set(values, forKey: webDAVSyncV2ProgressStorageKey)
+    }
+
+    func fetchRemoteSyncV2Index() async throws -> SyncV2Index? {
+        guard let indexURL = webDAVConfiguration.syncV2IndexFileURL else {
+            throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+        }
+
+        guard let encrypted = try await webDAVClient.download(url: indexURL, configuration: webDAVConfiguration) else {
+            return nil
+        }
+        guard !encrypted.isEmpty else {
+            throw WebDAVSyncError.emptyRemotePayload
+        }
+
+        let data = try decryptSnapshot(encrypted)
+        return try JSONDecoder.appDecoder.decode(SyncV2Index.self, from: data)
+    }
+
+    func loadRemoteSyncV2Changeset(fileName: String) async throws -> SyncV2Changeset {
+        guard let url = webDAVConfiguration.fileURL(fileName: fileName) else {
+            throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+        }
+
+        guard let encrypted = try await webDAVClient.download(url: url, configuration: webDAVConfiguration) else {
+            throw WebDAVSyncError.snapshotNotFound
+        }
+        guard !encrypted.isEmpty else {
+            throw WebDAVSyncError.emptyRemotePayload
+        }
+
+        let data = try decryptSnapshot(encrypted)
+        return try JSONDecoder.appDecoder.decode(SyncV2Changeset.self, from: data)
+    }
+
+    func uploadRemoteSyncV2Changeset(_ changeset: SyncV2Changeset, fileName: String) async throws {
+        guard let url = webDAVConfiguration.fileURL(fileName: fileName) else {
+            throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+        }
+
+        let encoded = try JSONEncoder.appEncoder.encode(changeset)
+        let encrypted = try encryptSnapshot(encoded)
+        try await webDAVClient.upload(data: encrypted, url: url, configuration: webDAVConfiguration)
+    }
+
+    func uploadRemoteSyncV2Index(_ index: SyncV2Index) async throws {
+        guard let indexURL = webDAVConfiguration.syncV2IndexFileURL else {
+            throw WebDAVSyncError.invalidConfiguration("WebDAV URL 无效")
+        }
+
+        let encoded = try JSONEncoder.appEncoder.encode(index)
+        let encrypted = try encryptSnapshot(encoded)
+        try await webDAVClient.upload(data: encrypted, url: indexURL, configuration: webDAVConfiguration)
+    }
+
+    func parseSyncV2RemoteRefs(from index: SyncV2Index, after sequence: Int) -> [SyncV2RemoteRef] {
+        index.changesetFileNames
+            .compactMap { fileName -> SyncV2RemoteRef? in
+                guard let parsed = webDAVConfiguration.parseSyncV2Sequence(fromChangesetFileName: fileName) else {
+                    return nil
+                }
+                guard parsed > sequence else { return nil }
+                return SyncV2RemoteRef(sequence: parsed, fileName: fileName)
+            }
+            .sorted { $0.sequence < $1.sequence }
+    }
+
+    @discardableResult
+    func syncChangesWithWebDAVV2(trigger: String) async -> Bool {
+        guard iCloudSyncEnabled else { return false }
+        guard verifyWebDAVConfiguration(logFailures: true) else {
+            iCloudSyncStatus = "配置不完整"
+            return false
+        }
+
+        iCloudSyncStatus = "同步中"
+
+        let pulled = await pullChangesFromWebDAVV2(trigger: "\(trigger)：拉取")
+        guard pulled else { return false }
+
+        guard syncV2Conflicts.isEmpty else {
+            iCloudSyncStatus = "冲突待处理"
+            addICloudLog("\(trigger)：检测到 \(syncV2Conflicts.count) 个冲突，等待手动选择")
+            return true
+        }
+
+        guard webDAVHasPendingLocalChanges || !syncV2Outbox.isEmpty else {
+            iCloudSyncStatus = "已开启"
+            addICloudLog("\(trigger)：无本地新增变更，跳过推送")
+            return true
+        }
+
+        let pushed = await pushChangesToWebDAVV2(trigger: "\(trigger)：推送")
+        if pushed {
+            webDAVHasPendingLocalChanges = false
+        }
+        return pushed
+    }
+
+    @discardableResult
+    func pullChangesFromWebDAVV2(trigger: String) async -> Bool {
+        guard iCloudSyncEnabled else { return false }
+        guard verifyWebDAVConfiguration(logFailures: true) else {
+            iCloudSyncEnabled = false
+            return false
+        }
+
+        do {
+            guard let index = try await fetchRemoteSyncV2Index() else {
+                iCloudSyncStatus = "已开启"
+                addICloudLog("\(trigger)：云端暂无 v2 变更")
+                return true
+            }
+
+            let refs = parseSyncV2RemoteRefs(from: index, after: lastProcessedSyncV2Sequence())
+            if refs.isEmpty {
+                iCloudSyncStatus = syncV2Conflicts.isEmpty ? "已开启" : "冲突待处理"
+                addICloudLog("\(trigger)：没有新的 v2 变更")
+                return true
+            }
+
+            var maxSequence = lastProcessedSyncV2Sequence()
+            for ref in refs {
+                let changeset = try await loadRemoteSyncV2Changeset(fileName: ref.fileName)
+                for event in changeset.changes {
+                    processRemoteSyncV2Event(event)
+                }
+                maxSequence = max(maxSequence, changeset.sequence)
+            }
+
+            saveLastProcessedSyncV2Sequence(maxSequence)
+            persistSyncV2Metadata(scheduleSync: false)
+            iCloudLastSyncedAt = Date()
+
+            if syncV2Conflicts.isEmpty {
+                iCloudSyncStatus = "已开启"
+                addICloudLog("\(trigger)：已应用 \(refs.count) 个变更分片（最新序号 \(maxSequence)）")
+            } else {
+                iCloudSyncStatus = "冲突待处理"
+                addICloudLog("\(trigger)：已拉取，但存在 \(syncV2Conflicts.count) 个冲突")
+            }
+
+            return true
+        } catch {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：拉取失败（\(error.localizedDescription)）")
+            return false
+        }
+    }
+
+    @discardableResult
+    func pushChangesToWebDAVV2(trigger: String) async -> Bool {
+        guard iCloudSyncEnabled else { return false }
+        guard verifyWebDAVConfiguration(logFailures: true) else {
+            iCloudSyncEnabled = false
+            return false
+        }
+        guard let baseURL = webDAVConfiguration.baseURL else {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：WebDAV 目标 URL 无效")
+            return false
+        }
+
+        do {
+            try await webDAVClient.ensureDirectoryExists(directoryURL: baseURL, configuration: webDAVConfiguration)
+
+            syncV2Outbox.removeAll { syncV2AppliedEventIDs.contains($0.id) || syncV2IgnoredEventIDs.contains($0.id) }
+            guard !syncV2Outbox.isEmpty else {
+                iCloudSyncStatus = "已开启"
+                addICloudLog("\(trigger)：无待推送变更")
+                persistSyncV2Metadata(scheduleSync: false)
+                return true
+            }
+
+            let remoteIndex = try await fetchRemoteSyncV2Index()
+            let digest = syncV2Digest(for: syncV2Outbox)
+
+            if let remoteIndex, let latestFile = remoteIndex.changesetFileNames.last {
+                if let latest = try? await loadRemoteSyncV2Changeset(fileName: latestFile), latest.digest == digest {
+                    syncV2AppliedEventIDs.formUnion(syncV2Outbox.map(\.id))
+                    syncV2Outbox.removeAll()
+                    webDAVHasPendingLocalChanges = false
+                    persistSyncV2Metadata(scheduleSync: false)
+                    iCloudSyncStatus = "已开启"
+                    addICloudLog("\(trigger)：变更内容与云端最新一致，未创建新版本")
+                    return true
+                }
+            }
+
+            let nextSequence = (remoteIndex?.latestSequence ?? 0) + 1
+            let changesetFileName = webDAVConfiguration.syncV2ChangesetFileName(sequence: nextSequence)
+            let changeset = SyncV2Changeset(
+                protocolVersion: 2,
+                sequence: nextSequence,
+                deviceId: syncV2DeviceID,
+                createdAt: Date(),
+                digest: digest,
+                changes: syncV2Outbox
+            )
+
+            try await uploadRemoteSyncV2Changeset(changeset, fileName: changesetFileName)
+
+            let nextFileNames = (remoteIndex?.changesetFileNames ?? []) + [changesetFileName]
+            let nextIndex = SyncV2Index(
+                protocolVersion: 2,
+                latestSequence: nextSequence,
+                updatedAt: Date(),
+                changesetFileNames: nextFileNames
+            )
+            try await uploadRemoteSyncV2Index(nextIndex)
+
+            syncV2AppliedEventIDs.formUnion(syncV2Outbox.map(\.id))
+            syncV2Outbox.removeAll()
+            webDAVHasPendingLocalChanges = false
+            saveLastProcessedSyncV2Sequence(nextSequence)
+            persistSyncV2Metadata(scheduleSync: false)
+
+            iCloudLastSyncedAt = Date()
+            iCloudSyncStatus = "已开启"
+            addICloudLog("\(trigger)：推送成功（v2 序号 \(nextSequence)，变更 \(changeset.changes.count) 条）")
+            return true
+        } catch {
+            iCloudSyncStatus = "同步失败"
+            addICloudLog("\(trigger)：推送失败（\(error.localizedDescription)）")
+            return false
+        }
+    }
+
+    func processRemoteSyncV2Event(_ event: SyncV2Event) {
+        if syncV2AppliedEventIDs.contains(event.id) || syncV2IgnoredEventIDs.contains(event.id) {
+            return
+        }
+
+        if event.deviceId == syncV2DeviceID {
+            syncV2AppliedEventIDs.insert(event.id)
+            syncV2Outbox.removeAll { $0.id == event.id }
+            return
+        }
+
+        if syncV2Conflicts.contains(where: { $0.remoteEvent.id == event.id }) {
+            return
+        }
+
+        let localState = localSyncV2EntityState(entityType: event.entityType, entityId: event.entityId)
+
+        if shouldCreateSyncV2Conflict(for: event, localState: localState) {
+            let conflict = SyncV2Conflict(
+                detectedAt: Date(),
+                entityType: event.entityType,
+                entityId: event.entityId,
+                remoteEvent: event,
+                localPayload: localState.payload,
+                localUpdatedAt: localState.updatedAt,
+                localDeletedAt: localState.deletedAt
+            )
+            syncV2Conflicts.append(conflict)
+            return
+        }
+
+        if event.operation == .upsert,
+           let hash = localState.payloadHash,
+           hash == event.payloadHash,
+           localState.updatedAt == event.entityUpdatedAt {
+            syncV2Outbox.removeAll {
+                $0.entityType == event.entityType &&
+                $0.entityId == event.entityId &&
+                $0.operation == .upsert &&
+                $0.payloadHash == event.payloadHash
+            }
+            syncV2AppliedEventIDs.insert(event.id)
+            return
+        }
+
+        if event.operation == .delete,
+           let deletedAt = localState.deletedAt,
+           let remoteDeletedAt = event.deletedAt,
+           deletedAt >= remoteDeletedAt {
+            syncV2Outbox.removeAll {
+                $0.entityType == event.entityType &&
+                $0.entityId == event.entityId &&
+                $0.operation == .delete
+            }
+            syncV2AppliedEventIDs.insert(event.id)
+            return
+        }
+
+        isApplyingSyncV2Remote = true
+        applyRemoteSyncV2Event(event, force: false)
+        isApplyingSyncV2Remote = false
+        syncV2AppliedEventIDs.insert(event.id)
+    }
+
+    func shouldCreateSyncV2Conflict(for event: SyncV2Event, localState: SyncV2LocalEntityState) -> Bool {
+        if event.operation == .upsert,
+           let localHash = localState.payloadHash,
+           localHash == event.payloadHash {
+            return false
+        }
+
+        if event.operation == .delete,
+           let localDeletedAt = localState.deletedAt,
+           let remoteDeletedAt = event.deletedAt,
+           localDeletedAt >= remoteDeletedAt {
+            return false
+        }
+
+        let localPending = syncV2Outbox.last(where: { $0.entityType == event.entityType && $0.entityId == event.entityId })
+        if let localPending {
+            let isSameMutation =
+                localPending.operation == event.operation &&
+                localPending.payloadHash == event.payloadHash &&
+                localPending.deletedAt == event.deletedAt
+            if !isSameMutation {
+                return true
+            }
+        }
+
+        guard let base = event.baseUpdatedAt else { return false }
+
+        if let localUpdatedAt = localState.updatedAt, localUpdatedAt > base {
+            return true
+        }
+        if let localDeletedAt = localState.deletedAt, localDeletedAt > base {
+            return true
+        }
+        return false
+    }
+
+    func localSyncV2EntityState(entityType: SyncV2EntityType, entityId: UUID) -> SyncV2LocalEntityState {
+        switch entityType {
+        case .transaction:
+            let entity = transactions.first(where: { $0.id == entityId })
+            let payload = entity.flatMap(encodedSyncV2Payload)
+            let deletedAt = deletedTransactionMarkers.first(where: { $0.id == entityId })?.deletedAt
+            return SyncV2LocalEntityState(payload: payload, payloadHash: payload.map(sha256Hex), updatedAt: entity?.updatedAt, deletedAt: deletedAt)
+        case .category:
+            let entity = categories.first(where: { $0.id == entityId })
+            let payload = entity.flatMap(encodedSyncV2Payload)
+            let deletedAt = deletedCategoryMarkers.first(where: { $0.id == entityId })?.deletedAt
+            return SyncV2LocalEntityState(payload: payload, payloadHash: payload.map(sha256Hex), updatedAt: entity?.updatedAt, deletedAt: deletedAt)
+        case .account:
+            let entity = accounts.first(where: { $0.id == entityId })
+            let payload = entity.flatMap(encodedSyncV2Payload)
+            let deletedAt = deletedAccountMarkers.first(where: { $0.id == entityId })?.deletedAt
+            return SyncV2LocalEntityState(payload: payload, payloadHash: payload.map(sha256Hex), updatedAt: entity?.updatedAt, deletedAt: deletedAt)
+        case .budget:
+            let entity = budgets.first(where: { $0.id == entityId })
+            let payload = entity.flatMap(encodedSyncV2Payload)
+            let deletedAt = deletedBudgetMarkers.first(where: { $0.id == entityId })?.deletedAt
+            return SyncV2LocalEntityState(payload: payload, payloadHash: payload.map(sha256Hex), updatedAt: entity?.updatedAt, deletedAt: deletedAt)
+        case .transfer:
+            let entity = transfers.first(where: { $0.id == entityId })
+            let payload = entity.flatMap(encodedSyncV2Payload)
+            let deletedAt = deletedTransferMarkers.first(where: { $0.id == entityId })?.deletedAt
+            return SyncV2LocalEntityState(payload: payload, payloadHash: payload.map(sha256Hex), updatedAt: entity?.updatedAt, deletedAt: deletedAt)
+        case .recurring:
+            let entity = recurringTransactions.first(where: { $0.id == entityId })
+            let payload = entity.flatMap(encodedSyncV2Payload)
+            let deletedAt = deletedRecurringMarkers.first(where: { $0.id == entityId })?.deletedAt
+            return SyncV2LocalEntityState(payload: payload, payloadHash: payload.map(sha256Hex), updatedAt: entity?.updatedAt, deletedAt: deletedAt)
+        }
+    }
+
+    func applyRemoteSyncV2Event(_ event: SyncV2Event, force: Bool) {
+        switch (event.entityType, event.operation) {
+        case (.transaction, .upsert):
+            guard let entity = decodedSyncV2Payload(event.payload, as: Transaction.self) else { return }
+            if let index = transactions.firstIndex(where: { $0.id == entity.id }) {
+                if !force, transactions[index].updatedAt > entity.updatedAt { return }
+                transactions[index] = entity
+            } else {
+                transactions.insert(entity, at: 0)
+            }
+            transactions.sort(by: { $0.date > $1.date })
+            removeDeletionMarkers(matching: [entity.id], from: &deletedTransactionMarkers)
+            transactionsStore.save(transactions)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.transaction, .delete):
+            let deletedAt = event.deletedAt ?? event.entityUpdatedAt
+            transactions.removeAll(where: { $0.id == event.entityId })
+            deletedTransactionMarkers = mergeDeletionMarkers(
+                deletedTransactionMarkers,
+                [EntityDeletionMarker(id: event.entityId, deletedAt: deletedAt)]
+            )
+            transactionsStore.save(transactions)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.category, .upsert):
+            guard let entity = decodedSyncV2Payload(event.payload, as: Category.self) else { return }
+            if let index = categories.firstIndex(where: { $0.id == entity.id }) {
+                if !force, categories[index].updatedAt > entity.updatedAt { return }
+                categories[index] = entity
+            } else {
+                categories.append(entity)
+            }
+            categories.sort {
+                if $0.type != $1.type { return $0.type.rawValue < $1.type.rawValue }
+                if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+                return $0.name.localizedCompare($1.name) == .orderedAscending
+            }
+            removeDeletionMarkers(matching: [entity.id], from: &deletedCategoryMarkers)
+            categoriesStore.save(categories)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.category, .delete):
+            let deletedAt = event.deletedAt ?? event.entityUpdatedAt
+            categories.removeAll(where: { $0.id == event.entityId })
+            deletedCategoryMarkers = mergeDeletionMarkers(
+                deletedCategoryMarkers,
+                [EntityDeletionMarker(id: event.entityId, deletedAt: deletedAt)]
+            )
+            categoriesStore.save(categories)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.account, .upsert):
+            guard let entity = decodedSyncV2Payload(event.payload, as: Account.self) else { return }
+            if let index = accounts.firstIndex(where: { $0.id == entity.id }) {
+                if !force, accounts[index].updatedAt > entity.updatedAt { return }
+                accounts[index] = entity
+            } else {
+                accounts.append(entity)
+            }
+            removeDeletionMarkers(matching: [entity.id], from: &deletedAccountMarkers)
+            accountsStore.save(accounts)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.account, .delete):
+            let deletedAt = event.deletedAt ?? event.entityUpdatedAt
+            accounts.removeAll(where: { $0.id == event.entityId })
+            if accounts.isEmpty {
+                accounts = [Account(id: UUID(), name: "现金", type: .cash, initialBalance: 0)]
+            }
+            deletedAccountMarkers = mergeDeletionMarkers(
+                deletedAccountMarkers,
+                [EntityDeletionMarker(id: event.entityId, deletedAt: deletedAt)]
+            )
+            accountsStore.save(accounts)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.budget, .upsert):
+            guard let entity = decodedSyncV2Payload(event.payload, as: Budget.self) else { return }
+            if let index = budgets.firstIndex(where: { $0.id == entity.id }) {
+                if !force, budgets[index].updatedAt > entity.updatedAt { return }
+                budgets[index] = entity
+            } else {
+                budgets.append(entity)
+            }
+            budgets.sort(by: { $0.month > $1.month })
+            removeDeletionMarkers(matching: [entity.id], from: &deletedBudgetMarkers)
+            budgetsStore.save(budgets)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.budget, .delete):
+            let deletedAt = event.deletedAt ?? event.entityUpdatedAt
+            budgets.removeAll(where: { $0.id == event.entityId })
+            deletedBudgetMarkers = mergeDeletionMarkers(
+                deletedBudgetMarkers,
+                [EntityDeletionMarker(id: event.entityId, deletedAt: deletedAt)]
+            )
+            budgetsStore.save(budgets)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.transfer, .upsert):
+            guard let entity = decodedSyncV2Payload(event.payload, as: Transfer.self) else { return }
+            if let index = transfers.firstIndex(where: { $0.id == entity.id }) {
+                if !force, transfers[index].updatedAt > entity.updatedAt { return }
+                transfers[index] = entity
+            } else {
+                transfers.append(entity)
+            }
+            transfers.sort(by: { $0.date > $1.date })
+            removeDeletionMarkers(matching: [entity.id], from: &deletedTransferMarkers)
+            transfersStore.save(transfers)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.transfer, .delete):
+            let deletedAt = event.deletedAt ?? event.entityUpdatedAt
+            transfers.removeAll(where: { $0.id == event.entityId })
+            deletedTransferMarkers = mergeDeletionMarkers(
+                deletedTransferMarkers,
+                [EntityDeletionMarker(id: event.entityId, deletedAt: deletedAt)]
+            )
+            transfersStore.save(transfers)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.recurring, .upsert):
+            guard let entity = decodedSyncV2Payload(event.payload, as: RecurringTransaction.self) else { return }
+            if let index = recurringTransactions.firstIndex(where: { $0.id == entity.id }) {
+                if !force, recurringTransactions[index].updatedAt > entity.updatedAt { return }
+                recurringTransactions[index] = entity
+            } else {
+                recurringTransactions.append(entity)
+            }
+            recurringTransactions.sort(by: { $0.startDate > $1.startDate })
+            removeDeletionMarkers(matching: [entity.id], from: &deletedRecurringMarkers)
+            recurringTransactionsStore.save(recurringTransactions)
+            persistDeletionMarkers(scheduleSync: false)
+
+        case (.recurring, .delete):
+            let deletedAt = event.deletedAt ?? event.entityUpdatedAt
+            recurringTransactions.removeAll(where: { $0.id == event.entityId })
+            deletedRecurringMarkers = mergeDeletionMarkers(
+                deletedRecurringMarkers,
+                [EntityDeletionMarker(id: event.entityId, deletedAt: deletedAt)]
+            )
+            recurringTransactionsStore.save(recurringTransactions)
+            persistDeletionMarkers(scheduleSync: false)
+        }
     }
 }
