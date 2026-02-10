@@ -6,6 +6,7 @@ struct HomeView: View {
     @Binding var month: Date
 
     @State private var selectedTransactionId: UUID?
+    @State private var editingTransaction: Transaction?
 
     var body: some View {
         Group {
@@ -23,6 +24,10 @@ struct HomeView: View {
         }
         .onChange(of: store.transactions.map(\.id)) { _ in
             validateSelection()
+        }
+        .sheet(item: $editingTransaction) { transaction in
+            AddTransactionSheet(editingTransaction: transaction)
+                .environmentObject(store)
         }
     }
 
@@ -110,6 +115,14 @@ struct HomeView: View {
                                     ? Color("PrimaryYellow").opacity(0.18)
                                     : Color.clear
                             )
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    editingTransaction = tx
+                                } label: {
+                                    Label("编辑", systemImage: "pencil")
+                                }
+                                .tint(Color("PrimaryYellow"))
+                            }
                         } else {
                             NavigationLink {
                                 TransactionDetailRoute(transaction: tx) {
@@ -117,6 +130,14 @@ struct HomeView: View {
                                 }
                             } label: {
                                 TransactionRow(transaction: tx)
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    editingTransaction = tx
+                                } label: {
+                                    Label("编辑", systemImage: "pencil")
+                                }
+                                .tint(Color("PrimaryYellow"))
                             }
                         }
                     }

@@ -9,14 +9,38 @@ struct AddTransactionSheet: View {
     @EnvironmentObject private var store: BillsStore
     @Environment(\.dismiss) private var dismiss
 
-    @State private var type: TransactionType = .expense
-    @State private var step: Step = .pickCategory
-    @State private var selectedCategory: Category?
+    private let editingTransaction: Transaction?
 
-    @State private var amountText: String = ""
-    @State private var note: String = ""
-    @State private var date: Date = Date()
+    @State private var type: TransactionType
+    @State private var step: Step
+    @State private var selectedCategoryId: UUID?
+
+    @State private var amountText: String
+    @State private var note: String
+    @State private var date: Date
     @State private var accountId: UUID?
+
+    init(editingTransaction: Transaction? = nil) {
+        self.editingTransaction = editingTransaction
+
+        if let transaction = editingTransaction {
+            _type = State(initialValue: transaction.type)
+            _step = State(initialValue: .inputAmount)
+            _selectedCategoryId = State(initialValue: transaction.categoryId)
+            _amountText = State(initialValue: transaction.amount.plainString)
+            _note = State(initialValue: transaction.note ?? "")
+            _date = State(initialValue: transaction.date)
+            _accountId = State(initialValue: transaction.accountId)
+        } else {
+            _type = State(initialValue: .expense)
+            _step = State(initialValue: .pickCategory)
+            _selectedCategoryId = State(initialValue: nil)
+            _amountText = State(initialValue: "")
+            _note = State(initialValue: "")
+            _date = State(initialValue: Date())
+            _accountId = State(initialValue: nil)
+        }
+    }
 
     var body: some View {
         NavigationView {
@@ -27,7 +51,7 @@ struct AddTransactionSheet: View {
                         type: $type,
                         categories: store.categories,
                         onSelect: { category in
-                            selectedCategory = category
+                            selectedCategoryId = category.id
                             step = .inputAmount
                         }
                     )
@@ -40,16 +64,19 @@ struct AddTransactionSheet: View {
                         amountText: $amountText,
                         note: $note,
                         date: $date,
+                        saveButtonTitle: editingTransaction == nil ? "保存" : "更新",
                         onBack: {
                             step = .pickCategory
-                            selectedCategory = nil
-                            amountText = ""
+                            if editingTransaction == nil {
+                                selectedCategoryId = nil
+                                amountText = ""
+                            }
                         },
                         onSave: save
                     )
                 }
             }
-            .navigationTitle("记一笔")
+            .navigationTitle(editingTransaction == nil ? "记一笔" : "编辑流水")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -61,18 +88,36 @@ struct AddTransactionSheet: View {
         }
     }
 
+    private var selectedCategory: Category? {
+        guard let selectedCategoryId else { return nil }
+        return store.category(for: selectedCategoryId)
+    }
+
     private func save() {
         guard let category = selectedCategory else { return }
         guard let amount = DecimalParser.parse(amountText), amount > 0 else { return }
 
-        store.addTransaction(
-            type: type,
-            amount: amount,
-            date: date,
-            categoryId: category.id,
-            accountId: accountId ?? store.defaultAccountId,
-            note: note
-        )
+        if let editingTransaction {
+            store.updateTransaction(
+                id: editingTransaction.id,
+                type: type,
+                amount: amount,
+                date: date,
+                categoryId: category.id,
+                accountId: accountId ?? editingTransaction.accountId,
+                note: note
+            )
+        } else {
+            store.addTransaction(
+                type: type,
+                amount: amount,
+                date: date,
+                categoryId: category.id,
+                accountId: accountId ?? store.defaultAccountId,
+                note: note
+            )
+        }
+
         dismiss()
     }
 }
@@ -145,6 +190,7 @@ private struct AmountInputStep: View {
     @Binding var amountText: String
     @Binding var note: String
     @Binding var date: Date
+    let saveButtonTitle: String
     let onBack: () -> Void
     let onSave: () -> Void
 
@@ -174,7 +220,7 @@ private struct AmountInputStep: View {
 
                 Spacer()
 
-                Button("保存") {
+                Button(saveButtonTitle) {
                     onSave()
                 }
                 .font(.system(size: 16, weight: .semibold))
@@ -183,7 +229,7 @@ private struct AmountInputStep: View {
                 .background(Color("PrimaryYellow"))
                 .foregroundColor(.primary)
                 .clipShape(Capsule())
-                .accessibilityLabel("保存流水")
+                .accessibilityLabel("\(saveButtonTitle)流水")
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)

@@ -79,12 +79,19 @@ private struct DayTransactionsSheet: View {
 
     let day: Date
 
+    @State private var editingTransaction: Transaction?
+
     var body: some View {
         NavigationView {
             List {
                 let txs = store.transactions(onDay: day).sorted(by: { $0.date > $1.date })
                 ForEach(txs) { tx in
-                    TransactionRow(transaction: tx)
+                    Button {
+                        editingTransaction = tx
+                    } label: {
+                        TransactionRow(transaction: tx)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .navigationTitle(DateFormatter.dayTitle.string(from: day))
@@ -94,6 +101,10 @@ private struct DayTransactionsSheet: View {
                     Button("关闭") { dismiss() }
                 }
             }
+        }
+        .sheet(item: $editingTransaction) { transaction in
+            AddTransactionSheet(editingTransaction: transaction)
+                .environmentObject(store)
         }
     }
 }

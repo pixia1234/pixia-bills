@@ -997,6 +997,37 @@ final class BillsStore: ObservableObject {
         persistDeletionMarkers(scheduleSync: false)
     }
 
+    func updateTransaction(
+        id: UUID,
+        type: TransactionType,
+        amount: Decimal,
+        date: Date,
+        categoryId: UUID,
+        accountId: UUID,
+        note: String?
+    ) {
+        guard amount > 0 else { return }
+        guard category(for: categoryId)?.type == type else { return }
+        guard account(for: accountId) != nil else { return }
+        guard let index = transactions.firstIndex(where: { $0.id == id }) else { return }
+
+        var transaction = transactions[index]
+        let baseUpdatedAt = transaction.updatedAt
+        transaction.type = type
+        transaction.amount = amount
+        transaction.date = date
+        transaction.categoryId = categoryId
+        transaction.accountId = accountId
+        transaction.note = note?.nilIfEmpty
+        transaction.updatedAt = Date()
+
+        transactions[index] = transaction
+        removeDeletionMarkers(matching: [transaction.id], from: &deletedTransactionMarkers)
+        queueSyncV2TransactionUpsert(transaction, baseUpdatedAt: baseUpdatedAt)
+        persistTransactions()
+        persistDeletionMarkers(scheduleSync: false)
+    }
+
     func deleteTransactions(at offsets: IndexSet) {
         let ids: [UUID] = offsets.compactMap { index in
             guard transactions.indices.contains(index) else { return nil }
